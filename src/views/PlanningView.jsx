@@ -10,12 +10,14 @@ import {
   customerCellBudgetLimit,
   customerBudgetTimmar,
 } from "../domain/calculations.js";
+import { feasibleCustomerColumnMaxTotal } from "../domain/customerColumnRedistribute.js";
 import { wholeHours, formatHours } from "../domain/hours.js";
 import { theme } from "../theme.js";
 import { MonthNavigator } from "../components/MonthNavigator.jsx";
 
 const LS_PLAN_INTERNAL = "resurz-plan-internal-open";
 const LS_PLAN_DRIFT = "resurz-plan-drift-open";
+const LS_PLAN_VIEW = "resurz-plan-view-mode";
 
 const font = theme.fontMono;
 const bodyFont = theme.fontSans;
@@ -137,12 +139,16 @@ function HourSliderRow({
   onChange,
   customerMax,
   budgetHintLine,
+  maxSlider: maxSliderOverride,
 }) {
   const v = wholeHours(hours);
   const hasCustCap = customerMax !== undefined && Number.isFinite(customerMax);
-  const maxSlider = hasCustCap
-    ? Math.max(v, customerMax, customerMax === 0 && v === 0 ? 0 : 1)
-    : Math.max(cap, v, 1);
+  const maxSlider =
+    maxSliderOverride !== undefined && Number.isFinite(maxSliderOverride)
+      ? Math.max(wholeHours(maxSliderOverride), v, 1)
+      : hasCustCap
+        ? Math.max(v, customerMax, customerMax === 0 && v === 0 ? 0 : 1)
+        : Math.max(cap, v, 1);
   const atCustomerCap = hasCustCap && customerMax >= 0 && v >= customerMax && v > 0;
   const dragRef = useRef({ t: 0, raw: v });
   const shownVal = Math.min(v, maxSlider);
@@ -283,12 +289,15 @@ function CollapsiblePlanningSection({ title, accent, open, onToggle, summary, ch
   );
 }
 
+const DRAG_MIME = "application/x-resurz-person";
+
 export function PlanningView({
   workspace,
   selectedMonthId,
   setSelectedMonthId,
   shiftMonth,
   upsertHours,
+  setCustomerColumnTotal,
   getCellHours,
   clearPersonAllocationsForMonth,
 }) {
@@ -326,6 +335,39 @@ export function PlanningView({
       return false;
     }
   });
+
+  const [planMode, setPlanMode] = useState(() => {
+    try {
+      const v = localStorage.getItem(LS_PLAN_VIEW);
+      return v === "customer" ? "customer" : "person";
+    } catch {
+      return "person";
+    }
+  });
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(LS_PLAN_VIEW, planMode);
+    } catch {
+      /* ignore */
+    }
+  }, [planMode]);
+
+  const contributorsByCustomer = useMemo(() => {
+    const monthSlice = allocationsForMonth(workspace.allocations, selectedMonthId);
+    /** @type {Record<string, string[]>} */
+    const out = {};
+    for (const c of activeCustomers) {
+      const ids = new Set();
+      for (const a of monthSlice) {
+        if (a.categoryType === "customer" && a.refId === c.id && wholeHours(a.hours) > 0) {
+          ids.add(a.personId);
+        }
+      }
+      out[c.id] = [...ids].filter((pid) => activePeople.some((p) => p.id === pid));
+    }
+    return out;
+  }, [workspace.allocations, selectedMonthId, activeCustomers, activePeople]);
 
   useEffect(() => {
     try {
@@ -375,6 +417,53 @@ export function PlanningView({
           onShift={shiftMonth}
           compact
         />
+        <div
+          style={{
+            display: "flex",
+            background: theme.surface,
+            borderRadius: 10,
+            border: `1px solid ${theme.border}`,
+            padding: 3,
+            gap: 2,
+          }}
+          role="group"
+          aria-label="Planeringsvy"
+        >
+          <button
+            type="button"
+            onClick={() => setPlanMode("person")}
+            style={{
+              padding: "8px 14px",
+              borderRadius: 8,
+              border: "none",
+              cursor: "pointer",
+              fontSize: 12,
+              fontWeight: 700,
+              fontFamily: bodyFont,
+              background: planMode === "person" ? theme.tabActive : "transparent",
+              color: planMode === "person" ? theme.text : theme.textMuted,
+            }}
+          >
+            Personer
+          </button>
+          <button
+            type="button"
+            onClick={() => setPlanMode("customer")}
+            style={{
+              padding: "8px 14px",
+              borderRadius: 8,
+              border: "none",
+              cursor: "pointer",
+              fontSize: 12,
+              fontWeight: 700,
+              fontFamily: bodyFont,
+              background: planMode === "customer" ? theme.tabActive : "transparent",
+              color: planMode === "customer" ? theme.text : theme.textMuted,
+            }}
+          >
+            Kunder
+          </button>
+        </div>
         <div style={{ flex: 1, minWidth: 260 }}>
           <div style={{ fontSize: 9, fontWeight: 700, color: theme.textSoft, marginBottom: 5 }}>SNABB KPI (TEAM)</div>
           <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
@@ -432,23 +521,36 @@ export function PlanningView({
               letterSpacing: 1,
             }}
           >
-            Team ({activePeople.length})
+            {planMode === "customer" ? (
+              <>
+                Team — dra till kund
+                <div style={{ fontSize: 8, fontWeight: 600, color: theme.textSoft, marginTop: 3 }}>{activePeople.length} personer</div>
+              </>
+            ) : (
+              <>Team ({activePeople.length})</>
+            )}
           </div>
           <div style={{ flex: 1, overflowY: "auto" }}>
             {activePeople.map((person) => {
               const st = sidebarRowStats(person);
-              const isSel = resolvedPersonId === person.id;
+              const isSel = planMode === "person" && resolvedPersonId === person.id;
               return (
                 <button
                   key={person.id}
                   type="button"
+                  draggable={planMode === "customer"}
+                  onDragStart={(e) => {
+                    if (planMode !== "customer") return;
+                    e.dataTransfer.setData(DRAG_MIME, person.id);
+                    e.dataTransfer.effectAllowed = "copy";
+                  }}
                   onClick={() => setSelectedId(person.id)}
                   style={{
                     display: "block",
                     width: "100%",
                     textAlign: "left",
                     padding: "10px 12px",
-                    cursor: "pointer",
+                    cursor: planMode === "customer" ? "grab" : "pointer",
                     border: "none",
                     borderLeft: `3px solid ${isSel ? theme.accentBlue : "transparent"}`,
                     background: isSel ? theme.surface : "transparent",
@@ -502,8 +604,72 @@ export function PlanningView({
         </div>
 
         {/* Editor */}
-        <div style={{ flex: 1, overflowY: "auto", padding: "16px 18px", background: theme.bg }}>
-          {!selectedPerson ? (
+        <div
+          style={{
+            flex: 1,
+            overflowY: "auto",
+            padding: "16px 18px",
+            background: theme.bg,
+            display: "flex",
+            flexDirection: "column",
+            minHeight: 0,
+          }}
+        >
+          {planMode === "customer" ? (
+            <>
+              <p
+                style={{
+                  fontSize: 12,
+                  color: theme.textMuted,
+                  marginTop: 0,
+                  marginBottom: 14,
+                  lineHeight: 1.5,
+                  maxWidth: 720,
+                }}
+              >
+                Dra en person från vänsterlistan till en kundrad. Reglaget <strong>totalt team</strong> fördelar om timmar mellan
+                personerna på kunden (proportionellt). Justera en person i detalj med respektive slider. Övriga kolumner (intern
+                projekt/drift) planeras under <strong>Personer</strong>.
+              </p>
+              {activeCustomers.length === 0 ? (
+                <div style={{ color: theme.textMuted, fontSize: 13 }}>Inga aktiva kunder.</div>
+              ) : (
+                activeCustomers.map((c) => (
+                  <CustomerColumnCard
+                    key={c.id}
+                    customer={c}
+                    workspace={workspace}
+                    selectedMonthId={selectedMonthId}
+                    contributorIds={contributorsByCustomer[c.id] || []}
+                    getCellHours={getCellHours}
+                    upsertHours={upsertHours}
+                    setCustomerColumnTotal={setCustomerColumnTotal}
+                    activePeople={activePeople}
+                  />
+                ))
+              )}
+              <div style={{ marginTop: 22, flexShrink: 0 }}>
+                <div
+                  style={{
+                    fontSize: 9,
+                    fontWeight: 700,
+                    color: theme.textSoft,
+                    fontFamily: font,
+                    textTransform: "uppercase",
+                    letterSpacing: 1,
+                    marginBottom: 10,
+                  }}
+                >
+                  Översikt — planerade timmar per kolumn (hela teamet)
+                </div>
+                <ColumnSummaryFoot
+                  custCols={custCols}
+                  intCols={intCols}
+                  driftCols={driftCols}
+                />
+              </div>
+            </>
+          ) : !selectedPerson ? (
             <div style={{ color: theme.textMuted, fontSize: 13 }}>
               Inga aktiva personer. Lägg till under Inställningar → Team.
             </div>
@@ -526,7 +692,7 @@ export function PlanningView({
                 setDriftSectionOpen={setDriftSectionOpen}
               />
 
-              <div style={{ marginTop: 22 }}>
+              <div style={{ marginTop: 22, flexShrink: 0 }}>
                 <div
                   style={{
                     fontSize: 9,
@@ -549,6 +715,194 @@ export function PlanningView({
             </>
           )}
         </div>
+      </div>
+    </div>
+  );
+}
+
+function CustomerColumnCard({
+  customer: c,
+  workspace,
+  selectedMonthId,
+  contributorIds,
+  getCellHours,
+  upsertHours,
+  setCustomerColumnTotal,
+  activePeople,
+}) {
+  const [dragOver, setDragOver] = useState(false);
+  const [colWarn, setColWarn] = useState(null);
+
+  const list = contributorIds;
+  const columnSum = list.reduce((s, pid) => s + getCellHours(pid, "customer", c.id), 0);
+  const feasibleMax = feasibleCustomerColumnMaxTotal(workspace, selectedMonthId, c.id, list);
+
+  const flashWarn = (msg) => {
+    setColWarn(msg);
+    window.setTimeout(() => setColWarn(null), 7000);
+  };
+
+  const budgetT = customerBudgetTimmar(c);
+  const masterBudgetHint =
+    budgetT > 0
+      ? `Kundbudget ${formatHours(budgetT)} h (team) · max ${formatHours(feasibleMax)} h med nuvarande personer/kapacitet`
+      : customerBudgetTimmar(c) <= 0 && c.timpris > 0
+        ? "Ingen månadsbudget (kr) — ingen övre teamgräns."
+        : null;
+
+  const onDrop = (e) => {
+    e.preventDefault();
+    setDragOver(false);
+    const pid = e.dataTransfer.getData(DRAG_MIME);
+    if (!pid || !activePeople.some((p) => p.id === pid)) return;
+    if (list.includes(pid)) return;
+    const nextList = [...list, pid];
+    let curSum = nextList.reduce((s, id) => s + getCellHours(id, "customer", c.id), 0);
+    const maxT = feasibleCustomerColumnMaxTotal(workspace, selectedMonthId, c.id, nextList);
+    if (curSum === 0 && nextList.length > 0) {
+      curSum = Math.min(8, maxT);
+    }
+    setCustomerColumnTotal(c.id, curSum, nextList);
+  };
+
+  const removeContributor = (pid) => {
+    upsertHours(pid, "customer", c.id, 0);
+  };
+
+  return (
+    <div style={{ marginBottom: 18 }}>
+      {colWarn ? (
+        <div
+          style={{
+            padding: "9px 11px",
+            marginBottom: 10,
+            borderRadius: 10,
+            background: "rgba(232, 186, 168, 0.12)",
+            border: "1px solid rgba(232, 186, 168, 0.45)",
+            color: theme.accentSand,
+            fontSize: 11,
+            lineHeight: 1.4,
+          }}
+        >
+          {colWarn}
+        </div>
+      ) : null}
+      <div
+        onDragOver={(e) => {
+          e.preventDefault();
+          e.dataTransfer.dropEffect = "copy";
+        }}
+        onDragEnter={() => setDragOver(true)}
+        onDragLeave={() => setDragOver(false)}
+        onDrop={onDrop}
+        style={{
+          padding: "12px 14px",
+          borderRadius: 12,
+          border: `1px solid ${dragOver ? `${(c.color || COL_CUSTOMER)}aa` : theme.border}`,
+          background: dragOver ? theme.surface2 : theme.surface,
+          boxShadow: dragOver ? `inset 0 0 0 1px ${(c.color || COL_CUSTOMER)}44` : "none",
+          transition: "border-color 0.15s, background 0.15s",
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10, flexWrap: "wrap" }}>
+          <div
+            style={{
+              width: 6,
+              alignSelf: "stretch",
+              minHeight: 40,
+              borderRadius: 4,
+              background: c.color || COL_CUSTOMER,
+              flexShrink: 0,
+            }}
+          />
+          <div style={{ flex: "1 1 160px", minWidth: 0 }}>
+            <div style={{ fontSize: 15, fontWeight: 800, color: theme.text }}>{c.name}</div>
+            <div style={{ fontSize: 10, color: theme.textSoft, marginTop: 2 }}>
+              Släpp personer här · {list.length} i poolen · summa {formatHours(columnSum)} h
+            </div>
+          </div>
+        </div>
+
+        {list.length === 0 ? (
+          <div style={{ fontSize: 12, color: theme.textMuted, padding: "8px 0" }}>
+            Inga personer i poolen. Dra från teamlistan till denna ruta.
+          </div>
+        ) : (
+          <>
+            <HourSliderRow
+              label="Totalt team (denna kund)"
+              sublabel={`${c.timpris} kr/h · beräknad budget ${formatHours(customerBudgetTimmar(c))} h`}
+              accent={c.color || COL_CUSTOMER}
+              hours={columnSum}
+              cap={feasibleMax}
+              maxSlider={Math.max(feasibleMax, 1)}
+              budgetHintLine={masterBudgetHint}
+              onChange={(raw) => {
+                const r = wholeHours(raw);
+                if (r > feasibleMax) {
+                  flashWarn("Överstiger vad som ryms i budget och/eller personernas kapacitet.");
+                }
+                setCustomerColumnTotal(c.id, Math.min(r, feasibleMax), list);
+              }}
+            />
+            <div style={{ fontSize: 9, fontWeight: 700, color: theme.textSoft, margin: "12px 0 6px", letterSpacing: 0.4 }}>
+              PERSONER PÅ KUNDEN
+            </div>
+            {list.map((pid) => {
+              const person = activePeople.find((p) => p.id === pid);
+              if (!person) return null;
+              const lim = customerCellBudgetLimit(workspace, selectedMonthId, person.id, c.id);
+              const applyCustomer = (raw) => {
+                const h = wholeHours(raw);
+                if (lim.isCapped && Number.isFinite(lim.maxForThisPerson) && h > lim.maxForThisPerson) {
+                  flashWarn(
+                    `${c.name}: Högst ${formatHours(lim.maxForThisPerson)} h för ${person.name} med nuvarande fördelning.`
+                  );
+                }
+                upsertHours(person.id, "customer", c.id, h);
+              };
+              const budgetHintLine = lim.isCapped
+                ? `Max ${formatHours(lim.maxForThisPerson)} h för ${person.name} (budget + övriga)`
+                : null;
+              return (
+                <div key={pid} style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <HourSliderRow
+                      label={person.name}
+                      sublabel={`Kap ${person.kapacitetPerManad} h`}
+                      accent={c.color || COL_CUSTOMER}
+                      hours={getCellHours(person.id, "customer", c.id)}
+                      cap={person.kapacitetPerManad}
+                      customerMax={lim.isCapped ? lim.maxForThisPerson : undefined}
+                      budgetHintLine={budgetHintLine}
+                      onChange={applyCustomer}
+                    />
+                  </div>
+                  <button
+                    type="button"
+                    title="Ta bort från kunden"
+                    onClick={() => removeContributor(pid)}
+                    style={{
+                      marginTop: 14,
+                      flexShrink: 0,
+                      padding: "6px 10px",
+                      borderRadius: 8,
+                      border: `1px solid ${theme.border}`,
+                      background: "rgba(232, 168, 184, 0.1)",
+                      color: theme.danger,
+                      fontSize: 11,
+                      fontWeight: 600,
+                      cursor: "pointer",
+                      fontFamily: bodyFont,
+                    }}
+                  >
+                    Ta bort
+                  </button>
+                </div>
+              );
+            })}
+          </>
+        )}
       </div>
     </div>
   );

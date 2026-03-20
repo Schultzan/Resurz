@@ -18,6 +18,7 @@ import { fetchRemoteWorkspaceRow, upsertRemoteWorkspace } from "../storage/supab
 import { isSupabaseConfigured } from "../storage/supabaseConfig.js";
 import { carryForwardFromPreviousMonth } from "../domain/monthCarryOver.js";
 import { customerCellBudgetLimit } from "../domain/calculations.js";
+import { redistributeCustomerColumnHours } from "../domain/customerColumnRedistribute.js";
 import {
   ensureInternAnnatForPerson,
   reapplyInternAnnatForPersonMonth,
@@ -56,7 +57,6 @@ export function useWorkspace() {
   const [syncError, setSyncError] = useState(null);
 
   const workspaceRef = useRef(workspace);
-  workspaceRef.current = workspace;
 
   const saveTimer = useRef(null);
   const persist = useCallback((updater) => {
@@ -100,6 +100,10 @@ export function useWorkspace() {
         setSyncError(err?.message || "Kunde inte spara i molnet");
       });
   }, []);
+
+  useEffect(() => {
+    workspaceRef.current = workspace;
+  }, [workspace]);
 
   useEffect(() => {
     if (!isSupabaseConfigured()) return;
@@ -234,6 +238,67 @@ export function useWorkspace() {
               updatedAt: nowIso(),
             },
           ];
+        }
+        return { ...prev, allocations };
+      });
+    },
+    [persist, selectedMonthId]
+  );
+
+  const setCustomerColumnTotal = useCallback(
+    (customerId, targetTotal, contributorPersonIds) => {
+      persist((prev) => {
+        const monthId = selectedMonthId;
+        const allowed = new Set((contributorPersonIds || []).filter(Boolean));
+        let allocations = prev.allocations.filter((a) => {
+          if (
+            a.monthId === monthId &&
+            a.categoryType === "customer" &&
+            a.refId === customerId
+          ) {
+            return allowed.has(a.personId);
+          }
+          return true;
+        });
+        const base = { ...prev, allocations };
+        const result = redistributeCustomerColumnHours(
+          base,
+          monthId,
+          customerId,
+          targetTotal,
+          [...allowed]
+        );
+        allocations = [...base.allocations];
+        for (const { personId, hours } of result.pairs) {
+          const h = wholeHours(hours);
+          const idx = allocations.findIndex(
+            (a) =>
+              a.monthId === monthId &&
+              a.personId === personId &&
+              a.categoryType === "customer" &&
+              a.refId === customerId
+          );
+          if (h === 0) {
+            if (idx >= 0) allocations = allocations.filter((_, i) => i !== idx);
+          } else if (idx >= 0) {
+            allocations = allocations.map((a, i) =>
+              i === idx ? { ...a, hours: h, updatedAt: nowIso() } : a
+            );
+          } else {
+            allocations = [
+              ...allocations,
+              {
+                id: newId(),
+                monthId,
+                personId,
+                categoryType: "customer",
+                refId: customerId,
+                hours: h,
+                createdAt: nowIso(),
+                updatedAt: nowIso(),
+              },
+            ];
+          }
         }
         return { ...prev, allocations };
       });
@@ -631,6 +696,7 @@ export function useWorkspace() {
     syncError,
     flushPersist,
     upsertHours,
+    setCustomerColumnTotal,
     clearPersonAllocationsForMonth,
     getCellHours,
     updateSettings,

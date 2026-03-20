@@ -47,7 +47,7 @@ function AuthenticatedApp({ onLock }) {
   const closeSettings = useCallback(() => {
     ws.flushPersist();
     setSettingsOpen(false);
-  }, [ws.flushPersist]);
+  }, [ws]);
 
   useEffect(() => {
     if (!settingsOpen) return;
@@ -232,6 +232,7 @@ function AuthenticatedApp({ onLock }) {
             setSelectedMonthId={ws.setSelectedMonthId}
             shiftMonth={ws.shiftMonth}
             upsertHours={ws.upsertHours}
+            setCustomerColumnTotal={ws.setCustomerColumnTotal}
             getCellHours={ws.getCellHours}
             clearPersonAllocationsForMonth={ws.clearPersonAllocationsForMonth}
           />
