@@ -148,6 +148,11 @@ export function DashboardView({ workspace, selectedMonthId, setSelectedMonthId, 
     { name: "Intern drift", value: tm.teamInternDrift, color: theme.drift },
   ].filter((x) => x.value > 0);
 
+  const marginKr = tm.teamIntakt - cost.monthlyBurn;
+  const marginGrad = tm.teamIntakt > 0 ? marginKr / tm.teamIntakt : null;
+  const marginAccent =
+    marginKr >= 0 ? "rgba(155, 212, 184, 0.42)" : "rgba(232, 168, 184, 0.38)";
+
   return (
     <div style={{ fontFamily: bodyFont, color: theme.text }}>
       <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 12, marginBottom: 12 }}>
@@ -158,6 +163,48 @@ export function DashboardView({ workspace, selectedMonthId, setSelectedMonthId, 
           onShift={shiftMonth}
           compact
         />
+      </div>
+
+      <div
+        style={{
+          marginBottom: 10,
+          borderRadius: 12,
+          padding: "14px 16px",
+          background: theme.surface,
+          border: `1px solid ${marginAccent}`,
+          boxShadow: `0 0 0 1px ${marginAccent} inset`,
+        }}
+      >
+        <div style={{ fontSize: 11, fontWeight: 700, color: theme.textMuted, marginBottom: 4 }}>
+          Marginal (vald månad)
+        </div>
+        <div
+          style={{
+            fontSize: "clamp(1.25rem, 4vw, 1.625rem)",
+            fontWeight: 800,
+            fontFamily: font,
+            color: marginKr >= 0 ? theme.ok : theme.danger,
+            letterSpacing: "-0.02em",
+            lineHeight: 1.15,
+          }}
+        >
+          {`${Math.round(marginKr).toLocaleString("sv-SE")} kr`}
+          <span style={{ fontSize: 15, fontWeight: 700, color: theme.textSoft, marginLeft: 10 }}>
+            {marginGrad != null ? pct(marginGrad) + " av intäkt" : "—"}
+          </span>
+        </div>
+        <div
+          style={{
+            fontSize: 10,
+            color: theme.textSoft,
+            marginTop: 8,
+            lineHeight: 1.45,
+            maxWidth: 720,
+          }}
+        >
+          Intäkt = planerade <strong style={{ color: theme.textMuted }}>kundtimmar</strong> × timpris denna månad.
+          Kostnad = <strong style={{ color: theme.textMuted }}>löner + övrigt</strong> under standardvärden.
+        </div>
       </div>
 
       <div
