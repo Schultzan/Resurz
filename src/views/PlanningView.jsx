@@ -491,23 +491,30 @@ export function PlanningView({
       <div
         style={{
           display: "flex",
+          alignItems: "flex-start",
           minHeight: 480,
+          maxHeight: "calc(100vh - 200px)",
+          overflowY: "auto",
+          overflowX: "hidden",
           border: `1px solid ${theme.border}`,
           borderRadius: 14,
-          overflow: "hidden",
           background: theme.surface,
         }}
       >
-        {/* Sidebar */}
+        {/* Sidebar — sticky så team alltid nåbart vid scroll (t.ex. kundvy) */}
         <div
           style={{
+            position: "sticky",
+            top: 0,
+            alignSelf: "flex-start",
             width: 252,
             flexShrink: 0,
             borderRight: `1px solid ${theme.border}`,
             background: theme.bgDeep,
             display: "flex",
             flexDirection: "column",
-            maxHeight: "78vh",
+            maxHeight: "calc(100vh - 200px)",
+            zIndex: 2,
           }}
         >
           <div
@@ -603,16 +610,15 @@ export function PlanningView({
           </div>
         </div>
 
-        {/* Editor */}
+        {/* Editor — scroll sker i yttre raden så sidolisten kan vara sticky */}
         <div
           style={{
             flex: 1,
-            overflowY: "auto",
+            minWidth: 0,
             padding: "16px 18px",
             background: theme.bg,
             display: "flex",
             flexDirection: "column",
-            minHeight: 0,
           }}
         >
           {planMode === "customer" ? (
@@ -627,9 +633,9 @@ export function PlanningView({
                   maxWidth: 720,
                 }}
               >
-                Dra en person från vänsterlistan till en kundrad. Reglaget <strong>totalt team</strong> fördelar om timmar mellan
-                personerna på kunden (proportionellt). Justera en person i detalj med respektive slider. Övriga kolumner (intern
-                projekt/drift) planeras under <strong>Personer</strong>.
+                Dra en person från vänsterlistan till en kundrad. Reglaget <strong>totalt team</strong> fördelar om timmar
+                mellan alla som ligger på kunden (proportionellt). Varje persons reglage ändrar bara den personen — alla andra
+                oförändrade. Övriga kolumner (intern projekt/drift) planeras under <strong>Personer</strong>.
               </p>
               {activeCustomers.length === 0 ? (
                 <div style={{ color: theme.textMuted, fontSize: 13 }}>Inga aktiva kunder.</div>
@@ -835,7 +841,7 @@ function CustomerColumnCard({
               accent={c.color || COL_CUSTOMER}
               hours={columnSum}
               cap={feasibleMax}
-              maxSlider={Math.max(feasibleMax, 1)}
+              maxSlider={Math.max(feasibleMax, columnSum, 1)}
               budgetHintLine={masterBudgetHint}
               onChange={(raw) => {
                 const r = wholeHours(raw);
