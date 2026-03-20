@@ -1,0 +1,16 @@
+---
+description: Commit and push completed work to origin after substantive edits
+alwaysApply: true
+---
+
+# Git: committa och pusha efter uppgifter
+
+När en användaruppgift som rör kod är **klar** (bygget/lint OK där det är relevant):
+
+1. `git status` — se vad som ändrats.
+2. Committa med **tydligt meddelande** på svenska eller engelska (användarens språk i uppgiften).
+3. `git push origin` till aktuell branch (t.ex. `main`), om remote finns.
+
+**Undantag:** gör inte commit/push om användaren uttryckligen ber om motsatsen, eller om endast utforskning/utkast utan begäran om att spara.
+
+**Aldrig** committa `.env`, hemliga nycklar eller känslig konfiguration.
