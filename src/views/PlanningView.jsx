@@ -140,6 +140,8 @@ function HourSliderRow({
   customerMax,
   budgetHintLine,
   maxSlider: maxSliderOverride,
+  /** Förhindra att webbläsarens “clamp”/rekalkyl på range trigar onChange när andra sliders ändras (kundvy). */
+  requireUserGesture = false,
 }) {
   const v = wholeHours(hours);
   const hasCustCap = customerMax !== undefined && Number.isFinite(customerMax);
@@ -151,8 +153,18 @@ function HourSliderRow({
         : Math.max(cap, v, 1);
   const atCustomerCap = hasCustCap && customerMax >= 0 && v >= customerMax && v > 0;
   const dragRef = useRef({ t: 0, raw: v });
+  /** Pekare eller tangentbord-fokus aktivt på just detta reglage → godkänn onChange */
+  const userGestureRef = useRef(false);
   const shownVal = Math.min(v, maxSlider);
   const fillPct = maxSlider > 0 ? (shownVal / maxSlider) * 100 : 0;
+
+  const shouldCommitChange = (rangeEl) => {
+    if (!requireUserGesture) return true;
+    return (
+      userGestureRef.current ||
+      (typeof document !== "undefined" && document.activeElement === rangeEl)
+    );
+  };
 
   return (
     <div
@@ -215,10 +227,43 @@ function HourSliderRow({
         max={maxSlider}
         step={1}
         value={shownVal}
-        onPointerDown={() => {
+        onPointerDown={(e) => {
           dragRef.current = { t: Date.now(), raw: shownVal };
+          if (requireUserGesture) {
+            userGestureRef.current = true;
+            try {
+              e.currentTarget.setPointerCapture(e.pointerId);
+            } catch {
+              /* ignore */
+            }
+          }
+        }}
+        onPointerUp={(e) => {
+          if (!requireUserGesture) return;
+          userGestureRef.current = false;
+          try {
+            e.currentTarget.releasePointerCapture(e.pointerId);
+          } catch {
+            /* ignore */
+          }
+        }}
+        onPointerCancel={(e) => {
+          if (!requireUserGesture) return;
+          userGestureRef.current = false;
+          try {
+            e.currentTarget.releasePointerCapture(e.pointerId);
+          } catch {
+            /* ignore */
+          }
+        }}
+        onFocus={() => {
+          if (requireUserGesture) userGestureRef.current = true;
+        }}
+        onBlur={() => {
+          if (requireUserGesture) userGestureRef.current = false;
         }}
         onChange={(e) => {
+          if (!shouldCommitChange(e.currentTarget)) return;
           const raw = wholeHours(e.target.value);
           const now = Date.now();
           const prev = dragRef.current;
@@ -843,6 +888,7 @@ function CustomerColumnCard({
               cap={feasibleMax}
               maxSlider={Math.max(feasibleMax, columnSum, 1)}
               budgetHintLine={masterBudgetHint}
+              requireUserGesture
               onChange={(raw) => {
                 const r = wholeHours(raw);
                 if (r > feasibleMax) {
@@ -881,6 +927,7 @@ function CustomerColumnCard({
                       cap={person.kapacitetPerManad}
                       customerMax={lim.isCapped ? lim.maxForThisPerson : undefined}
                       budgetHintLine={budgetHintLine}
+                      requireUserGesture
                       onChange={applyCustomer}
                     />
                   </div>
