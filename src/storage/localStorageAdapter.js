@@ -6,6 +6,7 @@ import {
   ensureWorkspaceShape,
   expandMonthsToRollingWindow,
 } from "./workspace.js";
+import { isSupabaseConfigured } from "./supabaseConfig.js";
 
 const CLIENT_MTIME_KEY = "resurz-workspace-client-mtime-v1";
 
@@ -72,6 +73,19 @@ export function loadOrCreateWorkspace() {
   const base = loadWorkspace() ?? createDefaultWorkspace();
   const { workspace, structureChanged } = finalizeWorkspace(base);
   if (structureChanged) saveWorkspace(workspace);
+  return workspace;
+}
+
+/**
+ * För React-init: expandera/normalisera utan att skriva disk om Supabase ska hydreras.
+ * Annars får tom localStorage + saveWorkspace() ett nytt mtime och molndata ignoreras.
+ */
+export function buildInitialWorkspaceForUi() {
+  const base = loadWorkspace() ?? createDefaultWorkspace();
+  const { workspace, structureChanged } = finalizeWorkspace(base);
+  if (structureChanged && !isSupabaseConfigured()) {
+    saveWorkspace(workspace);
+  }
   return workspace;
 }
 

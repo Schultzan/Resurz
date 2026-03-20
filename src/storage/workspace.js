@@ -221,8 +221,10 @@ export function createDefaultWorkspace() {
  */
 export function migrateWorkspace(raw) {
   if (!raw || typeof raw !== "object") return null;
-  const v = raw.schemaVersion;
-  if (v !== 1 && v !== 2) return null;
+  let v = raw.schemaVersion;
+  if (v == null && Array.isArray(raw.people)) v = SCHEMA_VERSION;
+  v = Number(v);
+  if (!Number.isFinite(v) || (v !== 1 && v !== 2)) return null;
 
   const departments = [];
   for (const d of raw.departments || []) {

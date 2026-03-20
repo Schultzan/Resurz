@@ -22,8 +22,16 @@ export async function fetchRemoteWorkspaceRow() {
     .eq("id", id)
     .maybeSingle();
   if (error) throw error;
-  if (!data?.payload) return null;
-  return { payload: data.payload, updated_at: data.updated_at };
+  let payload = data?.payload;
+  if (typeof payload === "string") {
+    try {
+      payload = JSON.parse(payload);
+    } catch {
+      return null;
+    }
+  }
+  if (!payload || typeof payload !== "object") return null;
+  return { payload, updated_at: data.updated_at };
 }
 
 /**
@@ -34,11 +42,13 @@ export async function upsertRemoteWorkspace(workspace) {
   const sb = getClient();
   if (!sb) return null;
   const id = getSupabaseWorkspaceRowId();
-  const { data, error } = await sb
-    .from("resurz_workspace")
-    .upsert({ id, payload: workspace }, { onConflict: "id" })
-    .select("updated_at")
-    .single();
+  const { error } = await sb.from("resurz_workspace").upsert({ id, payload: workspace }, { onConflict: "id" });
   if (error) throw error;
-  return data ? { updated_at: data.updated_at } : null;
+  const { data: row, error: readErr } = await sb
+    .from("resurz_workspace")
+    .select("updated_at")
+    .eq("id", id)
+    .maybeSingle();
+  if (readErr) throw readErr;
+  return row?.updated_at ? { updated_at: row.updated_at } : { updated_at: new Date().toISOString() };
 }

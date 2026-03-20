@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import {
-  loadOrCreateWorkspace,
+  buildInitialWorkspaceForUi,
   saveWorkspace,
   loadWorkspace,
   finalizeWorkspace,
@@ -35,7 +35,7 @@ function nowIso() {
 }
 
 function initialWorkspaceBundle() {
-  const ws = loadOrCreateWorkspace();
+  const ws = buildInitialWorkspaceForUi();
   const cal = defaultMonthId();
   const monthId = ws.months.some((m) => m.id === cal) ? cal : ws.months[0]?.id ?? cal;
   return { ws, monthId };
