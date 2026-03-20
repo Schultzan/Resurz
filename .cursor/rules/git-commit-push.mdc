@@ -1,16 +1,20 @@
 ---
-description: Commit and push completed work to origin after substantive edits
+description: Efter kodändringar — commit, push till GitHub och produktionsdeploy (Vercel)
 alwaysApply: true
 ---
 
-# Git: committa och pusha efter uppgifter
+# Committa, pusha och deploya live
 
-När en användaruppgift som rör kod är **klar** (bygget/lint OK där det är relevant):
+När en användaruppgift som rör **kod eller konfiguration som ska ut i prod** är **klar** (bygg/lint OK):
 
-1. `git status` — se vad som ändrats.
-2. Committa med **tydligt meddelande** på svenska eller engelska (användarens språk i uppgiften).
-3. `git push origin` till aktuell branch (t.ex. `main`), om remote finns.
+1. **`git status`** — kontrollera ändringar.
+2. **`git add`** relevanta filer. **Aldrig** staged: `.env`, `*.pem`, hemligheter eller nycklar.
+3. **Commit** med tydligt meddelande (sv/en enligt användaren).
+4. **`git push origin`** aktuell branch (oftast `main`).
+5. **Produktionsdeploy:** kör från projektroten **`npm run deploy`** (bygger lokalt + `vercel --prod`). Kräver inloggad Vercel-CLI för denna maskin (`npx vercel login` vid behov).
 
-**Undantag:** gör inte commit/push om användaren uttryckligen ber om motsatsen, eller om endast utforskning/utkast utan begäran om att spara.
+**Git på macOS:** om `git commit` ger `unknown option trailer`, använd **`/usr/bin/git`** för commit och push.
 
-**Aldrig** committa `.env`, hemliga nycklar eller känslig konfiguration.
+**Undantag:** ingen commit/deploy om användaren säger att bara utforska/spara lokalt, eller uttryckligen stoppar release.
+
+**OBS:** Git-koppling i Vercel kan redan bygga vid push — `npm run deploy` kan då ge två byggen nära inpå varandra; användaren har bett om garanterad live-uppdatering, så kör deploy enligt steg 5 ändå om kommandot lyckas lokalt.

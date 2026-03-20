@@ -20,7 +20,7 @@ Your **public URL** comes from Vercel. **Supabase** must have the same env value
 ## Option B — Vercel CLI (from project folder)
 
 1. In a terminal: `npx vercel login` and complete the browser/device login.
-2. From the Resurz root: `npx vercel` (preview) or `npx vercel --prod` (production).
+2. From the Resurz root: `npx vercel` (preview) or **`npm run deploy`** / `npx vercel --prod --yes` (production — lokal `build` först, sedan upload).
 3. In the Vercel dashboard, add the same **Environment Variables** as in Option A, then redeploy.
 
 ## Cursor “Vercel MCP”
