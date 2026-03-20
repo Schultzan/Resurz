@@ -55,6 +55,9 @@ export function useWorkspace() {
   const [syncStatus, setSyncStatus] = useState(() => (isSupabaseConfigured() ? "loading" : "offline"));
   const [syncError, setSyncError] = useState(null);
 
+  const workspaceRef = useRef(workspace);
+  workspaceRef.current = workspace;
+
   const saveTimer = useRef(null);
   const persist = useCallback((updater) => {
     setWorkspaceState((prev) => {
@@ -76,6 +79,26 @@ export function useWorkspace() {
       }, 300);
       return next;
     });
+  }, []);
+
+  const flushPersist = useCallback(() => {
+    if (saveTimer.current) {
+      clearTimeout(saveTimer.current);
+      saveTimer.current = null;
+    }
+    const w = workspaceRef.current;
+    saveWorkspace(w);
+    if (!isSupabaseConfigured()) return;
+    upsertRemoteWorkspace(w)
+      .then((row) => {
+        if (row?.updated_at) setWorkspaceClientMtime(row.updated_at);
+        setSyncStatus("synced");
+        setSyncError(null);
+      })
+      .catch((err) => {
+        setSyncStatus("error");
+        setSyncError(err?.message || "Kunde inte spara i molnet");
+      });
   }, []);
 
   useEffect(() => {
@@ -317,10 +340,19 @@ export function useWorkspace() {
 
   const updatePerson = useCallback(
     (id, patch) => {
-      persist((prev) => ({
-        ...prev,
-        people: prev.people.map((p) => (p.id === id ? { ...p, ...patch } : p)),
-      }));
+      persist((prev) => {
+        const p2 = { ...patch };
+        if (Object.prototype.hasOwnProperty.call(patch, "kapacitetPerManad")) {
+          p2.kapacitetPerManad = Math.max(0, Number(patch.kapacitetPerManad) || 0);
+        }
+        if (Object.prototype.hasOwnProperty.call(patch, "malFakturerbaraTimmar")) {
+          p2.malFakturerbaraTimmar = Math.max(0, Number(patch.malFakturerbaraTimmar) || 0);
+        }
+        return {
+          ...prev,
+          people: prev.people.map((p) => (p.id === id ? { ...p, ...p2 } : p)),
+        };
+      });
     },
     [persist]
   );
@@ -363,16 +395,36 @@ export function useWorkspace() {
 
   const updateCustomer = useCallback(
     (id, patch) => {
-      const p2 = { ...patch };
-      if (Object.prototype.hasOwnProperty.call(patch, "color")) {
-        const n = normalizeHex(patch.color);
-        if (n) p2.color = n;
-        else delete p2.color;
-      }
-      persist((prev) => ({
-        ...prev,
-        customers: prev.customers.map((c) => (c.id === id ? { ...c, ...p2 } : c)),
-      }));
+      persist((prev) => {
+        const p2 = { ...patch };
+        if (Object.prototype.hasOwnProperty.call(patch, "color")) {
+          const n = normalizeHex(patch.color);
+          if (n) p2.color = n;
+          else delete p2.color;
+        }
+        if (Object.prototype.hasOwnProperty.call(patch, "name")) {
+          const trimmed = String(patch.name).trim();
+          if (!trimmed) return prev;
+          if (
+            prev.customers.some(
+              (c) => c.id !== id && c.name.toLowerCase() === trimmed.toLowerCase()
+            )
+          ) {
+            return prev;
+          }
+          p2.name = trimmed;
+        }
+        if (Object.prototype.hasOwnProperty.call(patch, "timpris")) {
+          p2.timpris = Math.max(0, Number(patch.timpris) || 0);
+        }
+        if (Object.prototype.hasOwnProperty.call(patch, "budgetPerManad")) {
+          p2.budgetPerManad = Math.max(0, Number(patch.budgetPerManad) || 0);
+        }
+        return {
+          ...prev,
+          customers: prev.customers.map((c) => (c.id === id ? { ...c, ...p2 } : c)),
+        };
+      });
     },
     [persist]
   );
@@ -420,22 +472,29 @@ export function useWorkspace() {
 
   const updateInternalProject = useCallback(
     (id, patch) => {
-      const p2 = { ...patch };
-      if (Object.prototype.hasOwnProperty.call(patch, "color")) {
-        const n = normalizeHex(patch.color);
-        if (n) p2.color = n;
-        else delete p2.color;
-      }
-      if (Object.prototype.hasOwnProperty.call(patch, "malTimmar")) {
-        const m = patch.malTimmar;
-        p2.malTimmar = m === "" || m == null ? null : wholeHours(m);
-      }
-      persist((prev) => ({
-        ...prev,
-        internalProjects: prev.internalProjects.map((p) =>
-          p.id === id ? { ...p, ...p2 } : p
-        ),
-      }));
+      persist((prev) => {
+        const p2 = { ...patch };
+        if (Object.prototype.hasOwnProperty.call(patch, "color")) {
+          const n = normalizeHex(patch.color);
+          if (n) p2.color = n;
+          else delete p2.color;
+        }
+        if (Object.prototype.hasOwnProperty.call(patch, "malTimmar")) {
+          const m = patch.malTimmar;
+          p2.malTimmar = m === "" || m == null ? null : wholeHours(m);
+        }
+        if (Object.prototype.hasOwnProperty.call(patch, "name")) {
+          const trimmed = String(patch.name).trim();
+          if (!trimmed) return prev;
+          p2.name = trimmed;
+        }
+        return {
+          ...prev,
+          internalProjects: prev.internalProjects.map((p) =>
+            p.id === id ? { ...p, ...p2 } : p
+          ),
+        };
+      });
     },
     [persist]
   );
@@ -570,6 +629,7 @@ export function useWorkspace() {
     shiftMonth,
     syncStatus,
     syncError,
+    flushPersist,
     upsertHours,
     clearPersonAllocationsForMonth,
     getCellHours,

@@ -273,23 +273,13 @@ function TeamSection({ people, departments, settings, addPerson, updatePerson, r
 }
 
 function PersonRow({ person, departments, updatePerson, removePerson }) {
-  const [cap, setCap] = useState(person.kapacitetPerManad);
-  const [mal, setMal] = useState(person.malFakturerbaraTimmar);
-
-  const save = () => {
-    updatePerson(person.id, {
-      kapacitetPerManad: cap,
-      malFakturerbaraTimmar: mal,
-    });
-  };
-
   const dept = departments.find((d) => d.id === person.departmentId);
 
   return (
     <div
       style={{
         display: "grid",
-        gridTemplateColumns: "minmax(140px,1fr) minmax(140px,180px) 14px 88px 88px auto auto",
+        gridTemplateColumns: "minmax(140px,1fr) minmax(140px,180px) 14px 88px 88px auto",
         gap: 12,
         alignItems: "center",
         padding: 14,
@@ -325,11 +315,26 @@ function PersonRow({ person, departments, updatePerson, removePerson }) {
       ) : (
         <span style={{ width: 10 }} />
       )}
-      <input type="number" min={0} value={cap} onChange={(e) => setCap(Number(e.target.value))} style={inpSm} title="Kapacitet" />
-      <input type="number" min={0} value={mal} onChange={(e) => setMal(Number(e.target.value))} style={inpSm} title="Mål fakt" />
-      <button type="button" onClick={save} style={btnGhost}>
-        Spara
-      </button>
+      <input
+        type="number"
+        min={0}
+        value={person.kapacitetPerManad}
+        onChange={(e) =>
+          updatePerson(person.id, { kapacitetPerManad: Number(e.target.value) })
+        }
+        style={inpSm}
+        title="Kapacitet"
+      />
+      <input
+        type="number"
+        min={0}
+        value={person.malFakturerbaraTimmar}
+        onChange={(e) =>
+          updatePerson(person.id, { malFakturerbaraTimmar: Number(e.target.value) })
+        }
+        style={inpSm}
+        title="Mål fakt"
+      />
       <button type="button" onClick={() => removePerson(person.id)} style={btnDanger}>
         Ta bort
       </button>
@@ -388,14 +393,7 @@ function DepartmentsSection({ departments, addDepartment, updateDepartment, remo
 }
 
 function DepartmentRow({ department, updateDepartment, removeDepartment }) {
-  const [nm, setNm] = useState(department.name);
-  const [col, setCol] = useState(department.color);
-
-  const save = () =>
-    updateDepartment(department.id, {
-      name: nm.trim(),
-      color: normalizeHex(col) || department.color,
-    });
+  const colorVal = normalizeHex(department.color) || "#64748b";
 
   return (
     <div
@@ -408,11 +406,20 @@ function DepartmentRow({ department, updateDepartment, removeDepartment }) {
         borderBottom: "1px solid #ffffff08",
       }}
     >
-      <input type="color" value={col} onChange={(e) => setCol(e.target.value)} style={{ width: 40, height: 32, border: "none", background: "transparent", cursor: "pointer" }} />
-      <input value={nm} onChange={(e) => setNm(e.target.value)} style={{ ...inp, flex: "1 1 160px", maxWidth: 280 }} />
-      <button type="button" onClick={save} style={btnGhost}>
-        Spara
-      </button>
+      <input
+        type="color"
+        value={colorVal}
+        onChange={(e) => {
+          const n = normalizeHex(e.target.value);
+          if (n) updateDepartment(department.id, { color: n });
+        }}
+        style={{ width: 40, height: 32, border: "none", background: "transparent", cursor: "pointer" }}
+      />
+      <input
+        value={department.name}
+        onChange={(e) => updateDepartment(department.id, { name: e.target.value })}
+        style={{ ...inp, flex: "1 1 160px", maxWidth: 280 }}
+      />
       <button
         type="button"
         onClick={() => removeDepartment(department.id)}
@@ -482,13 +489,7 @@ function CustomersSection({ customers, addCustomer, updateCustomer, removeCustom
 }
 
 function CustomerRow({ customer, updateCustomer, removeCustomer }) {
-  const [timpris, setTimpris] = useState(customer.timpris);
-  const [budget, setBudget] = useState(customer.budgetPerManad);
   const colorVal = normalizeHex(customer.color) || "#2563eb";
-
-  const save = () => {
-    updateCustomer(customer.id, { timpris, budgetPerManad: budget });
-  };
 
   return (
     <div style={{ ...row }}>
@@ -502,18 +503,35 @@ function CustomerRow({ customer, updateCustomer, removeCustomer }) {
         }}
         style={{ width: 40, height: 32, border: "none", background: "transparent", cursor: "pointer" }}
       />
-      <div style={{ fontWeight: 600, minWidth: 120 }}>{customer.name}</div>
+      <input
+        value={customer.name}
+        onChange={(e) => updateCustomer(customer.id, { name: e.target.value })}
+        style={{ ...inp, fontWeight: 600, minWidth: 120, flex: "1 1 140px", maxWidth: 280 }}
+        title="Visningsnamn"
+        aria-label="Kundnamn"
+      />
       <span style={{ fontSize: 11, color: "#666", width: 72 }} title="Timpris (kr/h)">
         Pris
       </span>
-      <input type="number" min={0} value={timpris} onChange={(e) => setTimpris(Number(e.target.value))} style={inpSm} title="Timpris kr/h" />
+      <input
+        type="number"
+        min={0}
+        value={customer.timpris}
+        onChange={(e) => updateCustomer(customer.id, { timpris: Number(e.target.value) })}
+        style={inpSm}
+        title="Timpris kr/h"
+      />
       <span style={{ fontSize: 11, color: "#666", width: 52 }} title="Budget kr/mån">
         Budget
       </span>
-      <input type="number" min={0} value={budget} onChange={(e) => setBudget(Number(e.target.value))} style={{ ...inpSm, width: 120 }} title="Budget kr/månad" />
-      <button type="button" onClick={save} style={btnGhost}>
-        Spara
-      </button>
+      <input
+        type="number"
+        min={0}
+        value={customer.budgetPerManad}
+        onChange={(e) => updateCustomer(customer.id, { budgetPerManad: Number(e.target.value) })}
+        style={{ ...inpSm, width: 120 }}
+        title="Budget kr/månad"
+      />
       <button type="button" onClick={() => removeCustomer(customer.id)} style={btnDanger}>
         Ta bort
       </button>
@@ -573,12 +591,7 @@ function DriftSection({ categories, addDriftCategory, updateDriftCategory, remov
 }
 
 function DriftRow({ category, updateDriftCategory, removeDriftCategory }) {
-  const [nm, setNm] = useState(category.name);
   const colorVal = normalizeHex(category.color) || "#64748b";
-
-  const save = () => {
-    updateDriftCategory(category.id, { name: nm.trim() });
-  };
 
   return (
     <div style={row}>
@@ -592,10 +605,11 @@ function DriftRow({ category, updateDriftCategory, removeDriftCategory }) {
         }}
         style={{ width: 40, height: 32, border: "none", background: "transparent", cursor: "pointer" }}
       />
-      <input value={nm} onChange={(e) => setNm(e.target.value)} style={{ ...inp, flex: "1 1 160px", maxWidth: 280 }} />
-      <button type="button" onClick={save} style={btnGhost}>
-        Spara namn
-      </button>
+      <input
+        value={category.name}
+        onChange={(e) => updateDriftCategory(category.id, { name: e.target.value })}
+        style={{ ...inp, flex: "1 1 160px", maxWidth: 280 }}
+      />
       <button type="button" onClick={() => removeDriftCategory(category.id)} style={btnDanger}>
         Ta bort
       </button>
@@ -651,14 +665,7 @@ function InternalSection({ projects, addInternalProject, updateInternalProject, 
 }
 
 function InternalRow({ project, updateInternalProject, removeInternalProject }) {
-  const [mal, setMal] = useState(project.malTimmar ?? "");
   const colorVal = normalizeHex(project.color) || "#7c3aed";
-
-  const save = () => {
-    updateInternalProject(project.id, {
-      malTimmar: mal === "" ? null : Number(mal),
-    });
-  };
 
   return (
     <div style={row}>
@@ -672,19 +679,26 @@ function InternalRow({ project, updateInternalProject, removeInternalProject }) 
         }}
         style={{ width: 40, height: 32, border: "none", background: "transparent", cursor: "pointer" }}
       />
-      <div style={{ fontWeight: 600, minWidth: 140 }}>{project.name}</div>
+      <input
+        value={project.name}
+        onChange={(e) => updateInternalProject(project.id, { name: e.target.value })}
+        style={{ ...inp, fontWeight: 600, minWidth: 140, flex: "1 1 160px", maxWidth: 280 }}
+        title="Projektnamn"
+      />
       <span style={{ fontSize: 11, color: "#666" }} title="Måltimmar (vägledning)">
         Mål (h)
       </span>
       <input
         placeholder="—"
-        value={mal}
-        onChange={(e) => setMal(e.target.value)}
+        value={project.malTimmar ?? ""}
+        onChange={(e) => {
+          const v = e.target.value;
+          updateInternalProject(project.id, {
+            malTimmar: v === "" ? null : v,
+          });
+        }}
         style={inpSm}
       />
-      <button type="button" onClick={save} style={btnGhost}>
-        Spara
-      </button>
       <button type="button" onClick={() => removeInternalProject(project.id)} style={btnDanger}>
         Ta bort
       </button>

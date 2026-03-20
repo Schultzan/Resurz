@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { useWorkspace } from "./hooks/useWorkspace.js";
 import { DashboardView } from "./views/DashboardView.jsx";
 import { PlanningView } from "./views/PlanningView.jsx";
@@ -44,14 +44,19 @@ function AuthenticatedApp({ onLock }) {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const ws = useWorkspace();
 
+  const closeSettings = useCallback(() => {
+    ws.flushPersist();
+    setSettingsOpen(false);
+  }, [ws.flushPersist]);
+
   useEffect(() => {
     if (!settingsOpen) return;
     const onKey = (e) => {
-      if (e.key === "Escape") setSettingsOpen(false);
+      if (e.key === "Escape") closeSettings();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [settingsOpen]);
+  }, [settingsOpen, closeSettings]);
 
   return (
     <div
@@ -238,7 +243,7 @@ function AuthenticatedApp({ onLock }) {
           role="dialog"
           aria-modal="true"
           aria-label="Inställningar"
-          onClick={() => setSettingsOpen(false)}
+          onClick={closeSettings}
           style={{
             position: "fixed",
             inset: 0,
@@ -277,7 +282,7 @@ function AuthenticatedApp({ onLock }) {
               <span style={{ fontSize: 17, fontWeight: 800, color: theme.text }}>Inställningar</span>
               <button
                 type="button"
-                onClick={() => setSettingsOpen(false)}
+                onClick={closeSettings}
                 style={{
                   padding: "10px 16px",
                   borderRadius: 10,
