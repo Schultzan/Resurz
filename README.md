@@ -2,6 +2,17 @@
 
 Månadsplanering för timmar – React + Vite, valfri persistens via **Supabase** (en JSON-rad per workspace).
 
+## GitHub (första gången)
+
+Lokalt finns redan `git` med en **initial commit** (`.env` ingår **inte**).
+
+1. Installera [GitHub CLI](https://cli.github.com): `brew install gh`
+2. Logga in (öppnar webbläsaren):  
+   `gh auth login -h github.com -p https -w`
+3. Från projektroten, skapa publikt repo **Resurz** och pusha:  
+   `./scripts/push-to-github.sh`  
+   (Om namnet `Resurz` redan finns på ditt konto, byt namn i skriptet eller skapa repot manuellt och kör `git remote add origin …` + `git push -u origin main`.)
+
 ## Lokal utveckling
 
 ```bash
