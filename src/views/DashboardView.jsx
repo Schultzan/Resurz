@@ -53,6 +53,50 @@ function chartTooltipProps() {
   };
 }
 
+/** Tooltip för stapeldiagram: visar bara personer med timmar > 0. */
+function StackHoursTooltip({ active, payload, label }) {
+  if (!active || !payload?.length) return null;
+  const rows = payload.filter((p) => p.value != null && Number(p.value) > 0);
+  if (!rows.length) return null;
+  return (
+    <div
+      style={{
+        ...TOOLTIP_STYLE,
+        padding: "10px 12px",
+        minWidth: 140,
+      }}
+    >
+      <div style={{ ...TOOLTIP_LABEL_STYLE, marginBottom: 8 }}>{label}</div>
+      {rows.map((entry) => (
+        <div
+          key={String(entry.dataKey)}
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 10,
+            marginTop: 4,
+            fontSize: 12,
+          }}
+        >
+          <span
+            style={{
+              width: 8,
+              height: 8,
+              borderRadius: 2,
+              background: entry.color,
+              flexShrink: 0,
+            }}
+          />
+          <span style={{ color: theme.text, flex: 1 }}>{entry.name}</span>
+          <span style={{ color: theme.text, fontFamily: font, fontWeight: 600 }}>
+            {formatHours(entry.value)} h
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 const LEGEND_STYLE = {
   fontSize: 11,
   color: theme.textSoft,
@@ -274,7 +318,7 @@ export function DashboardView({ workspace, selectedMonthId, setSelectedMonthId, 
                 height={52}
               />
               <YAxis tick={{ ...AXIS_STYLE, fontSize: 10 }} width={36} />
-              <Tooltip {...chartTooltipProps()} formatter={(v, n) => [`${formatHours(v)} h`, n]} />
+              <Tooltip content={StackHoursTooltip} wrapperStyle={TOOLTIP_WRAPPER_STYLE} />
               <Legend
                 wrapperStyle={{ ...LEGEND_STYLE, fontSize: 10 }}
                 formatter={(v) => <span style={{ color: theme.text }}>{v}</span>}
@@ -303,7 +347,7 @@ export function DashboardView({ workspace, selectedMonthId, setSelectedMonthId, 
                 height={52}
               />
               <YAxis tick={{ ...AXIS_STYLE, fontSize: 10 }} width={36} />
-              <Tooltip {...chartTooltipProps()} formatter={(v, n) => [`${formatHours(v)} h`, n]} />
+              <Tooltip content={StackHoursTooltip} wrapperStyle={TOOLTIP_WRAPPER_STYLE} />
               <Legend
                 wrapperStyle={{ ...LEGEND_STYLE, fontSize: 10 }}
                 formatter={(v) => <span style={{ color: theme.text }}>{v}</span>}
