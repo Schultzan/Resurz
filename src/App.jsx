@@ -3,6 +3,8 @@ import { useWorkspace } from "./hooks/useWorkspace.js";
 import { DashboardView } from "./views/DashboardView.jsx";
 import { PlanningView } from "./views/PlanningView.jsx";
 import { DataView } from "./views/DataView.jsx";
+import { AppAccessScreen } from "./components/AppAccessScreen.jsx";
+import { clearSessionUnlock, readSessionUnlocked, writeSessionUnlocked } from "./auth/appAccess.js";
 import { theme } from "./theme.js";
 
 const font = theme.fontMono;
@@ -14,6 +16,30 @@ const MAIN_TABS = [
 ];
 
 export default function App() {
+  const [unlocked, setUnlocked] = useState(() => readSessionUnlocked());
+
+  if (!unlocked) {
+    return (
+      <AppAccessScreen
+        onUnlock={() => {
+          writeSessionUnlocked();
+          setUnlocked(true);
+        }}
+      />
+    );
+  }
+
+  return (
+    <AuthenticatedApp
+      onLock={() => {
+        clearSessionUnlock();
+        setUnlocked(false);
+      }}
+    />
+  );
+}
+
+function AuthenticatedApp({ onLock }) {
   const [mainTab, setMainTab] = useState("planning");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const ws = useWorkspace();
@@ -107,6 +133,23 @@ export default function App() {
         </nav>
 
         <div style={{ display: "flex", alignItems: "center", gap: 10, marginLeft: "auto" }}>
+          <button
+            type="button"
+            onClick={onLock}
+            style={{
+              padding: "8px 12px",
+              borderRadius: 10,
+              border: `1px solid ${theme.border}`,
+              background: "transparent",
+              color: theme.textSoft,
+              cursor: "pointer",
+              fontSize: 11,
+              fontWeight: 600,
+              fontFamily: bodyFont,
+            }}
+          >
+            Logga ut
+          </button>
           {ws.syncStatus === "loading" ? (
             <span style={{ fontSize: 11, color: theme.textMuted, fontFamily: font }}>Molnet…</span>
           ) : null}
