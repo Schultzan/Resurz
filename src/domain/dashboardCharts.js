@@ -29,7 +29,10 @@ export function customerPersonStackSeries(workspace, monthId) {
   }));
 
   const rows = customers.map((c) => {
-    const row = { label: c.name.length > 22 ? `${c.name.slice(0, 20)}…` : c.name };
+    const row = {
+      label: c.name.length > 22 ? `${c.name.slice(0, 20)}…` : c.name,
+      refId: c.id,
+    };
     let sum = 0;
     for (const pr of people) {
       const h = hoursOnCell(monthAlloc, monthId, pr.id, "customer", c.id);
@@ -55,7 +58,10 @@ export function internalProjectPersonStackSeries(workspace, monthId) {
   }));
 
   const rows = projects.map((proj) => {
-    const row = { label: proj.name.length > 22 ? `${proj.name.slice(0, 20)}…` : proj.name };
+    const row = {
+      label: proj.name.length > 22 ? `${proj.name.slice(0, 20)}…` : proj.name,
+      refId: proj.id,
+    };
     let sum = 0;
     for (const pr of people) {
       const h = hoursOnCell(monthAlloc, monthId, pr.id, "internalProject", proj.id);

@@ -20,6 +20,11 @@ body {
   min-height: 100vh;
 }
 
+/* Recharts: tooltip ovanför nästa diagram/stapel */
+.recharts-tooltip-wrapper {
+  z-index: 1000 !important;
+}
+
 /* Planering: slider med ifylld bana i projektfärg (--slider-accent, --slider-fill-pct) */
 .plan-slider-wrap input[type="range"].plan-slider {
   -webkit-appearance: none;
