@@ -10,6 +10,30 @@ import { theme } from "./theme.js";
 const font = theme.fontMono;
 const bodyFont = theme.fontSans;
 
+/** Låt webbläsarens Ctrl+Z gälla i text/nummerfält; planens undo hanteras separat under planering. */
+function isNativeTextEditingTarget(el) {
+  if (!el) return false;
+  if (el.isContentEditable) return true;
+  const tag = el.tagName;
+  if (tag === "TEXTAREA" || tag === "SELECT") return true;
+  if (tag !== "INPUT") return false;
+  const type = (el.type || "").toLowerCase();
+  return (
+    type === "text" ||
+    type === "search" ||
+    type === "email" ||
+    type === "password" ||
+    type === "url" ||
+    type === "tel" ||
+    type === "number" ||
+    type === "date" ||
+    type === "datetime-local" ||
+    type === "month" ||
+    type === "week" ||
+    type === "time"
+  );
+}
+
 const MAIN_TABS = [
   { id: "planning", label: "Planering" },
   { id: "dashboard", label: "Dashboard" },
@@ -57,6 +81,21 @@ function AuthenticatedApp({ onLock }) {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [settingsOpen, closeSettings]);
+
+  const { undo, redo } = ws;
+  useEffect(() => {
+    if (mainTab !== "planning" || settingsOpen) return;
+    const onKey = (e) => {
+      const mod = e.metaKey || e.ctrlKey;
+      if (!mod || e.key.toLowerCase() !== "z") return;
+      if (isNativeTextEditingTarget(e.target)) return;
+      e.preventDefault();
+      if (e.shiftKey) redo();
+      else undo();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [mainTab, settingsOpen, undo, redo]);
 
   return (
     <div

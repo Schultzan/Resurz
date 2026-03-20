@@ -140,8 +140,8 @@ function HourSliderRow({
   customerMax,
   budgetHintLine,
   maxSlider: maxSliderOverride,
-  /** Förhindra att webbläsarens “clamp”/rekalkyl på range trigar onChange när andra sliders ändras (kundvy). */
-  requireUserGesture = false,
+  /** Kundvy: uppdatera bara UI under drag; skicka värdet till parent först vid pointerup (undviker kedjereaktioner). */
+  commitOnPointerUp = false,
 }) {
   const v = wholeHours(hours);
   const hasCustCap = customerMax !== undefined && Number.isFinite(customerMax);
@@ -151,19 +151,41 @@ function HourSliderRow({
       : hasCustCap
         ? Math.max(v, customerMax, customerMax === 0 && v === 0 ? 0 : 1)
         : Math.max(cap, v, 1);
-  const atCustomerCap = hasCustCap && customerMax >= 0 && v >= customerMax && v > 0;
   const dragRef = useRef({ t: 0, raw: v });
-  /** Pekare eller tangentbord-fokus aktivt på just detta reglage → godkänn onChange */
-  const userGestureRef = useRef(false);
-  const shownVal = Math.min(v, maxSlider);
-  const fillPct = maxSlider > 0 ? (shownVal / maxSlider) * 100 : 0;
+  const ptrDownRef = useRef(false);
+  const [draft, setDraft] = useState(null);
 
-  const shouldCommitChange = (rangeEl) => {
-    if (!requireUserGesture) return true;
-    return (
-      userGestureRef.current ||
-      (typeof document !== "undefined" && document.activeElement === rangeEl)
-    );
+  useEffect(() => {
+    if (!ptrDownRef.current) setDraft(null);
+  }, [hours]);
+
+  const shownVal = Math.min(v, maxSlider);
+  const draftShown = draft != null ? Math.min(wholeHours(draft), maxSlider) : null;
+  const rangeVal = draftShown != null ? draftShown : shownVal;
+  const displayV = rangeVal;
+  const fillPct = maxSlider > 0 ? (rangeVal / maxSlider) * 100 : 0;
+  const atCustomerCap =
+    hasCustCap && customerMax >= 0 && displayV >= customerMax && displayV > 0;
+
+  const handleRangeChange = (e) => {
+    const raw = wholeHours(e.target.value);
+    if (commitOnPointerUp && ptrDownRef.current) {
+      dragRef.current = { t: Date.now(), raw };
+      setDraft(raw);
+      return;
+    }
+    const now = Date.now();
+    const prev = dragRef.current;
+    const dt = Math.max(now - prev.t, 1);
+    const dRaw = Math.abs(raw - prev.raw);
+    const speed = dRaw / dt;
+    dragRef.current = { t: now, raw };
+    const c = snapHoursFromDrag(raw, maxSlider, speed);
+    if (commitOnPointerUp) {
+      if (c !== v) onChange(c);
+    } else {
+      onChange(c);
+    }
   };
 
   return (
@@ -176,11 +198,15 @@ function HourSliderRow({
         gridTemplateColumns: "minmax(100px, 1fr) 1fr auto",
         gap: 8,
         alignItems: "center",
-        padding: "7px 10px",
+      padding: "7px 10px",
         borderRadius: 11,
-        background: v > 0 ? theme.surface : theme.bgDeep,
+        background: displayV > 0 ? theme.surface : theme.bgDeep,
         border: `1px solid ${
-          atCustomerCap ? "rgba(232, 186, 168, 0.55)" : v > 0 ? `${accent}55` : theme.border
+          atCustomerCap
+            ? "rgba(232, 186, 168, 0.55)"
+            : displayV > 0
+              ? `${accent}55`
+              : theme.border
         }`,
         marginBottom: 6,
         boxShadow: atCustomerCap ? "inset 0 0 0 1px rgba(232, 186, 168, 0.28)" : "none",
@@ -194,7 +220,7 @@ function HourSliderRow({
             minHeight: 36,
             borderRadius: 4,
             background: accent,
-            opacity: v > 0 ? 1 : 0.42,
+            opacity: displayV > 0 ? 1 : 0.42,
             flexShrink: 0,
             boxShadow: `inset 0 0 0 1px ${theme.border}`,
           }}
@@ -204,7 +230,7 @@ function HourSliderRow({
             style={{
               fontSize: 12,
               fontWeight: 600,
-              color: v > 0 ? theme.text : theme.textMuted,
+              color: displayV > 0 ? theme.text : theme.textMuted,
               overflow: "hidden",
               textOverflow: "ellipsis",
               whiteSpace: "nowrap",
@@ -226,11 +252,12 @@ function HourSliderRow({
         min={0}
         max={maxSlider}
         step={1}
-        value={shownVal}
+        value={rangeVal}
         onPointerDown={(e) => {
           dragRef.current = { t: Date.now(), raw: shownVal };
-          if (requireUserGesture) {
-            userGestureRef.current = true;
+          if (commitOnPointerUp) {
+            ptrDownRef.current = true;
+            setDraft(shownVal);
             try {
               e.currentTarget.setPointerCapture(e.pointerId);
             } catch {
@@ -239,48 +266,52 @@ function HourSliderRow({
           }
         }}
         onPointerUp={(e) => {
-          if (!requireUserGesture) return;
-          userGestureRef.current = false;
+          if (!commitOnPointerUp || !ptrDownRef.current) return;
+          ptrDownRef.current = false;
           try {
             e.currentTarget.releasePointerCapture(e.pointerId);
           } catch {
             /* ignore */
           }
-        }}
-        onPointerCancel={(e) => {
-          if (!requireUserGesture) return;
-          userGestureRef.current = false;
-          try {
-            e.currentTarget.releasePointerCapture(e.pointerId);
-          } catch {
-            /* ignore */
-          }
-        }}
-        onFocus={() => {
-          if (requireUserGesture) userGestureRef.current = true;
-        }}
-        onBlur={() => {
-          if (requireUserGesture) userGestureRef.current = false;
-        }}
-        onChange={(e) => {
-          if (!shouldCommitChange(e.currentTarget)) return;
-          const raw = wholeHours(e.target.value);
+          const raw = wholeHours(e.currentTarget.value);
           const now = Date.now();
           const prev = dragRef.current;
           const dt = Math.max(now - prev.t, 1);
           const dRaw = Math.abs(raw - prev.raw);
           const speed = dRaw / dt;
           dragRef.current = { t: now, raw };
-          onChange(snapHoursFromDrag(raw, maxSlider, speed));
+          const c = snapHoursFromDrag(raw, maxSlider, speed);
+          setDraft(null);
+          if (c !== v) onChange(c);
         }}
+        onPointerCancel={(e) => {
+          if (!commitOnPointerUp || !ptrDownRef.current) return;
+          ptrDownRef.current = false;
+          try {
+            e.currentTarget.releasePointerCapture(e.pointerId);
+          } catch {
+            /* ignore */
+          }
+          setDraft(null);
+        }}
+        onFocus={() => {
+          if (commitOnPointerUp && !ptrDownRef.current) {
+            dragRef.current = { t: Date.now(), raw: shownVal };
+          }
+        }}
+        onChange={handleRangeChange}
       />
       <input
         type="number"
         min={0}
         step={1}
-        value={v || ""}
+        value={(draft != null ? draftShown : v) || ""}
         placeholder="0"
-        onChange={(e) => onChange(wholeHours(e.target.value))}
+        onChange={(e) => {
+          ptrDownRef.current = false;
+          setDraft(null);
+          onChange(wholeHours(e.target.value));
+        }}
         style={{ ...cellInput, width: 56, flexShrink: 0 }}
       />
     </div>
@@ -888,7 +919,7 @@ function CustomerColumnCard({
               cap={feasibleMax}
               maxSlider={Math.max(feasibleMax, columnSum, 1)}
               budgetHintLine={masterBudgetHint}
-              requireUserGesture
+              commitOnPointerUp
               onChange={(raw) => {
                 const r = wholeHours(raw);
                 if (r > feasibleMax) {
@@ -927,7 +958,7 @@ function CustomerColumnCard({
                       cap={person.kapacitetPerManad}
                       customerMax={lim.isCapped ? lim.maxForThisPerson : undefined}
                       budgetHintLine={budgetHintLine}
-                      requireUserGesture
+                      commitOnPointerUp
                       onChange={applyCustomer}
                     />
                   </div>

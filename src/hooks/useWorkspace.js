@@ -35,6 +35,16 @@ function nowIso() {
   return new Date().toISOString();
 }
 
+const UNDO_STACK_MAX = 100;
+
+function cloneWorkspaceSnapshot(ws) {
+  try {
+    return structuredClone(ws);
+  } catch {
+    return JSON.parse(JSON.stringify(ws));
+  }
+}
+
 function initialWorkspaceBundle() {
   const ws = buildInitialWorkspaceForUi();
   const cal = defaultMonthId();
@@ -57,11 +67,18 @@ export function useWorkspace() {
   const [syncError, setSyncError] = useState(null);
 
   const workspaceRef = useRef(workspace);
+  const undoStackRef = useRef([]);
+  const redoStackRef = useRef([]);
 
   const saveTimer = useRef(null);
   const persist = useCallback((updater) => {
     setWorkspaceState((prev) => {
       const next = typeof updater === "function" ? updater(prev) : updater;
+      if (next !== prev) {
+        undoStackRef.current.push(cloneWorkspaceSnapshot(prev));
+        if (undoStackRef.current.length > UNDO_STACK_MAX) undoStackRef.current.shift();
+        redoStackRef.current = [];
+      }
       if (saveTimer.current) clearTimeout(saveTimer.current);
       saveTimer.current = setTimeout(() => {
         saveWorkspace(next);
@@ -80,6 +97,47 @@ export function useWorkspace() {
       return next;
     });
   }, []);
+
+  const runPersistFromSnapshot = useCallback((snap) => {
+    setWorkspaceState(snap);
+    if (saveTimer.current) {
+      clearTimeout(saveTimer.current);
+      saveTimer.current = null;
+    }
+    saveWorkspace(snap);
+    if (!isSupabaseConfigured()) {
+      setSyncStatus("offline");
+      return;
+    }
+    upsertRemoteWorkspace(snap)
+      .then((row) => {
+        if (row?.updated_at) setWorkspaceClientMtime(row.updated_at);
+        setSyncStatus("synced");
+        setSyncError(null);
+      })
+      .catch((err) => {
+        setSyncStatus("error");
+        setSyncError(err?.message || "Kunde inte spara i molnet");
+      });
+  }, []);
+
+  const undo = useCallback(() => {
+    const snap = undoStackRef.current.pop();
+    if (!snap) return false;
+    redoStackRef.current.push(cloneWorkspaceSnapshot(workspaceRef.current));
+    if (redoStackRef.current.length > UNDO_STACK_MAX) redoStackRef.current.shift();
+    runPersistFromSnapshot(snap);
+    return true;
+  }, [runPersistFromSnapshot]);
+
+  const redo = useCallback(() => {
+    const snap = redoStackRef.current.pop();
+    if (!snap) return false;
+    undoStackRef.current.push(cloneWorkspaceSnapshot(workspaceRef.current));
+    if (undoStackRef.current.length > UNDO_STACK_MAX) undoStackRef.current.shift();
+    runPersistFromSnapshot(snap);
+    return true;
+  }, [runPersistFromSnapshot]);
 
   const flushPersist = useCallback(() => {
     if (saveTimer.current) {
@@ -139,6 +197,8 @@ export function useWorkspace() {
         const { workspace: merged } = finalizeWorkspace(shaped);
         if (cancelled) return;
 
+        undoStackRef.current = [];
+        redoStackRef.current = [];
         setWorkspaceState(merged);
         setSelectedMonthIdState((prev) => {
           const cal = defaultMonthId();
@@ -695,6 +755,8 @@ export function useWorkspace() {
     syncStatus,
     syncError,
     flushPersist,
+    undo,
+    redo,
     upsertHours,
     setCustomerColumnTotal,
     clearPersonAllocationsForMonth,
