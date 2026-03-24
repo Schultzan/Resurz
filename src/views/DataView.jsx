@@ -17,7 +17,7 @@ const SECTION_META = {
   customers: {
     title: "Kunder",
     blurb:
-      "Kundrader styr kolumner i planeringen; timpris och budget används för timtak. Intäkt och marginal på dashboarden summerar per aktiv kund: budget per månad + fast månadsintäkt (samma tänk som fasta månadsrader i Excel), utan att räkna timmar × pris. Beläggning och timmar påverkas bara av planeringen.",
+      "Kundrader styr kolumner i planeringen; timpris och budget används för timtak. Teamets intäkt och marginal i översikten följer planerade fakturerbara timmar × respektive kunds timpris (aktiva kunder), plus eventuell fast månadsintäkt per kund.",
   },
   internal: {
     title: "Interna projekt",

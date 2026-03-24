@@ -63,7 +63,7 @@ export function personHourBreakdown(monthAlloc, personId, customersById) {
     if (a.categoryType === "customer") {
       billable += h;
       const cust = customersById[a.refId];
-      if (cust && cust.timpris > 0) revenue += h * cust.timpris;
+      if (cust && cust.timpris > 0 && cust.active !== false) revenue += h * cust.timpris;
     } else if (a.categoryType === "internalProject") {
       internalProject += h;
     } else if (a.categoryType === "internalDrift") {
@@ -122,12 +122,18 @@ export function teamMetrics(workspace, monthId) {
     });
   }
 
-  /** Intäkt (KPI): budget + fast månadsintäkt per aktiv kund — samma tänk som fasta månadsrader i Excel (ej timmar × pris). */
+  /** Intäkt (KPI): fakturerbara planerade timmar × kundens timpris (aktiva kunder), plus valfri fast månadsintäkt utan timmar. */
+  const activeCustIds = new Set(customers.filter((c) => c.active !== false).map((c) => c.id));
+  for (const a of monthAlloc) {
+    if (a.categoryType !== "customer" || !activeCustIds.has(a.refId)) continue;
+    const cust = customersById[a.refId];
+    if (cust && cust.timpris > 0) {
+      teamIntakt += wholeHours(a.hours) * cust.timpris;
+    }
+  }
   for (const c of customers) {
     if (c.active === false) continue;
-    const budget = Math.max(0, Math.round(Number(c.budgetPerManad) || 0));
-    const fast = Math.max(0, Math.round(Number(c.fastManadsintaktKr) || 0));
-    teamIntakt += budget + fast;
+    teamIntakt += Math.max(0, Math.round(Number(c.fastManadsintaktKr) || 0));
   }
 
   const teamTot = teamFakturerbara + teamInternProj + teamInternDrift;
