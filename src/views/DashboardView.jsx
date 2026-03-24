@@ -1,3 +1,4 @@
+import { Fragment } from "react";
 import {
   ResponsiveContainer,
   BarChart,
@@ -11,35 +12,33 @@ import {
   Pie,
   Cell,
 } from "recharts";
-import {
-  teamMetrics,
-  customerColumnMetrics,
-  driftColumnMetrics,
-  costPriceMetrics,
-} from "../domain/calculations.js";
+import { teamMetrics } from "../domain/calculations.js";
 import {
   customerPersonStackSeries,
-  internalProjectPersonStackSeries,
   personCapacityBars,
   departmentUtilizationSeries,
 } from "../domain/dashboardCharts.js";
 import { formatHours, wholeHours } from "../domain/hours.js";
 import { theme } from "../theme.js";
-import { MonthNavigator } from "../components/MonthNavigator.jsx";
-
 const font = theme.fontMono;
 const bodyFont = theme.fontSans;
 
 const AXIS_STYLE = { fill: theme.textMuted, fontSize: 11 };
-const GRID_STYLE = { stroke: theme.border };
+const GRID_STYLE = { stroke: theme.border, strokeOpacity: 0.35 };
+const BAR_RADIUS_TOP = [5, 5, 0, 0];
+/** Spår i kapacitetsdonuts (upptaget) — diskret mörk */
+const CAPACITY_TRACK_FILL = "rgba(38, 34, 56, 0.92)";
+const DASH_SEGMENT = {
+  background: "rgba(26, 22, 40, 0.72)",
+  border: "1px solid rgba(110, 100, 150, 0.16)",
+  borderRadius: 16,
+};
 const TOOLTIP_STYLE = {
   backgroundColor: theme.surface2,
   border: `1px solid ${theme.border}`,
   borderRadius: 10,
   color: theme.text,
 };
-/** Ljusare ”ledigt” så stapel + legend syns mot mörk bakgrund */
-const LEDIG_STACK_FILL = "rgba(172, 168, 210, 0.45)";
 const TOOLTIP_LABEL_STYLE = { color: theme.textMuted, fontWeight: 600 };
 const TOOLTIP_ITEM_STYLE = { color: theme.text };
 const TOOLTIP_WRAPPER_STYLE = { zIndex: 1000, outline: "none" };
@@ -103,26 +102,81 @@ const LEGEND_STYLE = {
   paddingTop: 4,
 };
 
-/** Etikett i mörkt tema (undviker svart SVG-text i pajer) */
-function piePercentLabel({ cx, cy, midAngle, innerRadius, outerRadius, percent }) {
-  if (percent < 0.06) return null;
-  const radius = innerRadius + (outerRadius - innerRadius) * 0.55;
+/** Tydligare segmentfärger enbart för pajen ”typ av arbete” (global tema billable/internal/drift ligger nära varandra). */
+const PIE_WORK_MIX_COLORS = {
+  Fakturerbart: "#6eb8ff",
+  "Interna projekt": "#e8b84a",
+  "Intern drift": "#5bd4a8",
+};
+
+/**
+ * Procent inuti ringen + titel (name) vid label-linjens ände, i mörkt tema.
+ * @param {object} props Recharts sector + endPoint (x,y) + textAnchor
+ */
+function pieWorkMixLabel({
+  cx,
+  cy,
+  midAngle,
+  innerRadius,
+  outerRadius,
+  percent,
+  x,
+  y,
+  textAnchor,
+  name,
+  payload,
+}) {
+  const title = name ?? payload?.name ?? "";
   const RADIAN = Math.PI / 180;
-  const x = cx + radius * Math.cos(-midAngle * RADIAN);
-  const y = cy + radius * Math.sin(-midAngle * RADIAN);
-  const t = `${(percent * 100).toFixed(0)}%`;
+  const ir = Number(innerRadius);
+  const or = Number(outerRadius);
+  if (!Number.isFinite(cx) || !Number.isFinite(cy) || !Number.isFinite(ir) || !Number.isFinite(or)) {
+    return null;
+  }
+  const innerR = ir + (or - ir) * 0.52;
+  const ix = cx + innerR * Math.cos(-midAngle * RADIAN);
+  const iy = cy + innerR * Math.sin(-midAngle * RADIAN);
+  const innerAnchor = ix > cx ? "start" : "end";
+  const pct = `${Math.round(percent * 100)}%`;
+  const showInner = percent >= 0.06;
+
+  const dx = x - cx;
+  const dy = y - cy;
+  const dist = Math.hypot(dx, dy) || 1;
+  const labelOut = 8;
+  const ox = x + (dx / dist) * labelOut;
+  const oy = y + (dy / dist) * labelOut;
+
   return (
-    <text
-      x={x}
-      y={y}
-      fill={theme.text}
-      textAnchor={x > cx ? "start" : "end"}
-      dominantBaseline="central"
-      fontSize={11}
-      fontWeight={700}
-    >
-      {t}
-    </text>
+    <g>
+      {showInner ? (
+        <text
+          x={ix}
+          y={iy}
+          fill={theme.text}
+          textAnchor={innerAnchor}
+          dominantBaseline="central"
+          fontSize={11}
+          fontWeight={700}
+        >
+          {pct}
+        </text>
+      ) : null}
+      {title ? (
+        <text
+          x={ox}
+          y={oy}
+          fill={theme.textMuted}
+          textAnchor={textAnchor}
+          dominantBaseline="central"
+          fontSize={11}
+          fontWeight={600}
+          style={{ fontFamily: bodyFont }}
+        >
+          {title}
+        </text>
+      ) : null}
+    </g>
   );
 }
 
@@ -130,102 +184,51 @@ function pct(x) {
   return `${Math.round(x * 100)}%`;
 }
 
-export function DashboardView({ workspace, selectedMonthId, setSelectedMonthId, shiftMonth }) {
+export function DashboardView({ workspace, selectedMonthId }) {
   const tm = teamMetrics(workspace, selectedMonthId);
-  const cost = costPriceMetrics(workspace, selectedMonthId);
-  const custCols = customerColumnMetrics(workspace, selectedMonthId);
-  const driftCols = driftColumnMetrics(workspace, selectedMonthId);
-  const sortedMonths = [...workspace.months].sort((a, b) => a.id.localeCompare(b.id));
 
   const custStack = customerPersonStackSeries(workspace, selectedMonthId);
-  const projStack = internalProjectPersonStackSeries(workspace, selectedMonthId);
   const personBars = personCapacityBars(workspace, selectedMonthId);
   const deptBars = departmentUtilizationSeries(workspace, selectedMonthId);
 
   const pieMix = [
-    { name: "Fakturerbart", value: tm.teamFakturerbara, color: theme.billable },
-    { name: "Interna projekt", value: tm.teamInternProj, color: theme.internal },
-    { name: "Intern drift", value: tm.teamInternDrift, color: theme.drift },
+    {
+      name: "Fakturerbart",
+      value: tm.teamFakturerbara,
+      color: PIE_WORK_MIX_COLORS.Fakturerbart,
+    },
+    {
+      name: "Interna projekt",
+      value: tm.teamInternProj,
+      color: PIE_WORK_MIX_COLORS["Interna projekt"],
+    },
+    {
+      name: "Intern drift",
+      value: tm.teamInternDrift,
+      color: PIE_WORK_MIX_COLORS["Intern drift"],
+    },
   ].filter((x) => x.value > 0);
 
-  const marginKr = tm.teamIntakt - cost.monthlyBurn;
-  const marginGrad = tm.teamIntakt > 0 ? marginKr / tm.teamIntakt : null;
+  /** Gemensam höjd för paj + kundstapel så korten i raden blir lika höga. */
+  const distributionPlotHeight = Math.max(300, Math.max(200, custStack.rows.length * 36 + 96));
 
   return (
     <div style={{ fontFamily: bodyFont, color: theme.text }}>
-      <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 12, marginBottom: 12 }}>
-        <MonthNavigator
-          months={sortedMonths}
-          selectedMonthId={selectedMonthId}
-          onSelect={setSelectedMonthId}
-          onShift={shiftMonth}
-          compact
-        />
-      </div>
-
-      <div
-        style={{
-          display: "grid",
-          gridTemplateColumns: "repeat(auto-fill, minmax(112px, 1fr))",
-          gap: 8,
-          marginBottom: 8,
-        }}
+      <ChartCard
+        title="Kapacitet per person"
+        subtitle="Endast personer med ledig tid. Längst till vänster: lediga timmar i personfärg, därefter planerat (mörkt), ev. över kapacitet (rött). Siffran efter stapeln = timmar ledigt."
+        compact
       >
-        <DashKpi label="Teamkapacitet" value={`${tm.teamkapacitet} h`} />
-        <DashKpi label="Fakturerbart" value={`${formatHours(tm.teamFakturerbara)} h`} color={theme.billable} />
-        <DashKpi label="Interna projekt" value={`${formatHours(tm.teamInternProj)} h`} color={theme.internal} />
-        <DashKpi label="Intern drift" value={`${formatHours(tm.teamInternDrift)} h`} color={theme.drift} />
-        <DashKpi label="Allokerat" value={`${formatHours(tm.teamTot)} h`} />
-        <DashKpi
-          label="Kvar"
-          value={`${formatHours(tm.teamKvar)} h`}
-          color={tm.teamKvar < 0 ? theme.danger : theme.ok}
-        />
-        <DashKpi label="Beläggning" value={pct(tm.teamAllocGrad)} />
-        <DashKpi label="Fakt. grad" value={pct(tm.teamBillGrad)} />
-        <DashKpi
-          label="Intäkt"
-          value={`${Math.round(tm.teamIntakt).toLocaleString("sv-SE")} kr`}
-          color={theme.revenue}
-        />
-        <DashKpi
-          label="Månadskostnad"
-          value={`${cost.monthlyBurn.toLocaleString("sv-SE")} kr`}
-          color={cost.monthlyBurn > 0 ? theme.accentSand : undefined}
-        />
-        <DashKpi
-          label="Marginal"
-          value={`${Math.round(marginKr).toLocaleString("sv-SE")} kr`}
-          hint={marginGrad != null ? `${pct(marginGrad)} av intäkt` : undefined}
-          color={marginKr >= 0 ? theme.ok : theme.danger}
-        />
-        <DashKpi
-          label="Självkostnad"
-          value={
-            cost.krPerHour != null
-              ? `${Math.round(cost.krPerHour).toLocaleString("sv-SE")} kr/h`
-              : "—"
-          }
-          color={cost.krPerHour != null ? theme.accentSand : theme.textSoft}
-        />
-      </div>
-
-      <p
-        style={{
-          fontSize: 10,
-          color: theme.textSoft,
-          margin: "0 0 14px",
-          maxWidth: 900,
-          lineHeight: 1.45,
-        }}
-      >
-        <strong style={{ color: theme.textMuted }}>Självkostnad:</strong> månadskostnad delat med snitt fakturerbara
-        timmar (vald månads kundtimmar × 11 ÷ 12).
-      </p>
+        {personBars.length === 0 ? (
+          <EmptyChart compact>Ingen med ledig tid — alla med kapacitet är fullt belagda (eller saknar kapacitet).</EmptyChart>
+        ) : (
+          <PersonFreeCapacityBarChart personBars={personBars} />
+        )}
+      </ChartCard>
 
       <ChartCard
-        title="Avdelningar — kapacitet och beläggning"
-        subtitle="Ett minidiagram per avdelning: ljus del = ledig kapacitet, färgad del = utnyttjad tid inom mål, röd spets = över kapacitet. Hover visar timmar."
+        title="Kapacitet per avdelning"
+        subtitle="Varje avdelning i eget kort. Färgad båge = utnyttjad kapacitet, mörk = ledigt, röd = över kapacitet. Hover visar timmar."
         compact
       >
         {deptBars.length === 0 ? (
@@ -237,156 +240,169 @@ export function DashboardView({ workspace, selectedMonthId, setSelectedMonthId, 
 
       <div
         style={{
-          display: "grid",
-          gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))",
-          gap: 12,
-          marginBottom: 12,
+          marginBottom: 10,
+          padding: "14px 14px 0",
+          background: "rgba(22, 18, 36, 0.45)",
+          borderRadius: 14,
+          border: "1px solid rgba(110, 100, 150, 0.12)",
         }}
       >
-        <ChartCard
-          title="Var är timmarna?"
-          subtitle="Samma månads total: kund (fakturerbart), interna projekt och intern drift. Pajen visar andelar — siffror i tooltip."
-          compact
+        <div style={{ fontSize: 15, fontWeight: 800, color: theme.text, marginBottom: 6, letterSpacing: "-0.02em" }}>
+          Fördelning av allokerade timmar
+        </div>
+        <div
+          style={{
+            fontSize: 10,
+            color: theme.textMuted,
+            marginBottom: 12,
+            lineHeight: 1.45,
+            maxWidth: 820,
+          }}
         >
-          {pieMix.length === 0 ? (
-            <EmptyChart compact>Inga allokerade timmar.</EmptyChart>
-          ) : (
-            <ResponsiveContainer width="100%" height={220}>
-              <PieChart margin={{ top: 8, right: 8, bottom: 8, left: 8 }}>
-                <Pie
-                  data={pieMix}
-                  dataKey="value"
-                  nameKey="name"
-                  cx="50%"
-                  cy="50%"
-                  innerRadius={48}
-                  outerRadius={72}
-                  paddingAngle={2}
-                  label={piePercentLabel}
-                >
-                  {pieMix.map((e) => (
-                    <Cell key={e.name} fill={e.color} stroke={theme.bgDeep} strokeWidth={1.5} />
-                  ))}
-                </Pie>
-                <Tooltip
-                  {...chartTooltipProps()}
-                  formatter={(v, name) => [`${formatHours(v)} h`, name]}
-                />
-                <Legend
-                  layout="horizontal"
-                  verticalAlign="bottom"
-                  wrapperStyle={LEGEND_STYLE}
-                  formatter={(value) => <span style={{ color: theme.textSoft }}>{value}</span>}
-                />
-              </PieChart>
-            </ResponsiveContainer>
-          )}
-        </ChartCard>
-
-        <ChartCard title="Kapacitet per person" compact>
-          {personBars.length === 0 ? (
-            <EmptyChart compact>Inga aktiva personer.</EmptyChart>
-          ) : (
-            <ResponsiveContainer width="100%" height={Math.max(200, personBars.length * 26)}>
-              <BarChart
-                layout="vertical"
-                data={personBars}
-                margin={{ left: 4, right: 12, top: 4, bottom: 4 }}
-              >
-                <CartesianGrid {...GRID_STYLE} horizontal strokeDasharray="3 3" />
-                <XAxis type="number" tick={{ ...AXIS_STYLE, fontSize: 10 }} />
-                <YAxis type="category" dataKey="name" width={108} tick={{ ...AXIS_STYLE, fontSize: 10 }} />
-                <Tooltip
-                  {...chartTooltipProps()}
-                  formatter={(v, n) => [`${formatHours(v)} h`, n]}
-                  labelFormatter={(_, p) => p?.[0]?.payload?.fullName}
-                />
-                <Legend wrapperStyle={LEGEND_STYLE} formatter={(v) => <span style={{ color: theme.text }}>{v}</span>} />
-                <Bar dataKey="Ledigt" stackId="p" fill={LEDIG_STACK_FILL} name="Ledigt" radius={[0, 0, 0, 0]} />
-                <Bar dataKey="Allokerat" stackId="p" fill={theme.billable} name="Inom kap." radius={[0, 3, 3, 0]} />
-                <Bar dataKey="Överkap" stackId="p" fill={theme.danger} name="Över" radius={[0, 3, 3, 0]} />
-              </BarChart>
-            </ResponsiveContainer>
-          )}
-        </ChartCard>
+          Vänster: andel allokerade timmar mellan fakturerbart, interna projekt och drift. Höger: timmar per kund med
+          staplar per person.
+        </div>
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 280px), 1fr))",
+            gap: 10,
+            alignItems: "stretch",
+            paddingBottom: 12,
+          }}
+        >
+          <div style={{ display: "flex", flexDirection: "column", minHeight: 0, minWidth: 0 }}>
+            <ChartCard
+              title="Timmar: typ av arbete"
+              subtitle="Fakturerbart, interna projekt och intern drift. Hover för timmar."
+              compact
+              fillHeight
+            >
+              {pieMix.length === 0 ? (
+                <EmptyChart compact fillMinHeight={distributionPlotHeight}>
+                  Inga allokerade timmar.
+                </EmptyChart>
+              ) : (
+                <div style={{ width: "100%", height: distributionPlotHeight, padding: "4px 0 0" }}>
+                  <ResponsiveContainer width="100%" height="100%">
+                    <PieChart margin={{ top: 10, right: 28, left: 28, bottom: 10 }}>
+                      <Pie
+                        data={pieMix}
+                        dataKey="value"
+                        nameKey="name"
+                        cx="50%"
+                        cy="46%"
+                        innerRadius="40%"
+                        outerRadius="68%"
+                        paddingAngle={1.5}
+                        label={pieWorkMixLabel}
+                        labelLine={{ stroke: "rgba(200, 190, 235, 0.45)", strokeWidth: 1 }}
+                      >
+                        {pieMix.map((e) => (
+                          <Cell key={e.name} fill={e.color} stroke="rgba(18, 14, 28, 0.85)" strokeWidth={1.5} />
+                        ))}
+                      </Pie>
+                      <Tooltip
+                        {...chartTooltipProps()}
+                        formatter={(v, name) => [`${formatHours(v)} h`, name]}
+                      />
+                      <Legend
+                        layout="horizontal"
+                        verticalAlign="bottom"
+                        align="center"
+                        wrapperStyle={{ ...LEGEND_STYLE, width: "100%", paddingTop: 8 }}
+                        formatter={(value) => <span style={{ color: theme.textSoft }}>{value}</span>}
+                      />
+                    </PieChart>
+                  </ResponsiveContainer>
+                </div>
+              )}
+            </ChartCard>
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", minHeight: 0, minWidth: 0 }}>
+            <ChartCard
+              title="Timmar per kund"
+              subtitle="Staplar per person (färger). Hover för timmar."
+              compact
+              fillHeight
+            >
+              {custStack.rows.length === 0 ? (
+                <EmptyChart compact fillMinHeight={distributionPlotHeight}>
+                  Ingen kund med timmar.
+                </EmptyChart>
+              ) : (
+                <div style={{ width: "100%", height: distributionPlotHeight }}>
+                  <ResponsiveContainer width="100%" height="100%">
+                    <BarChart
+                      data={custStack.rows}
+                      margin={{ left: 4, right: 8, top: 8, bottom: 44 }}
+                      barCategoryGap="14%"
+                      barGap={2}
+                    >
+                      <CartesianGrid {...GRID_STYLE} strokeDasharray="4 6" />
+                      <XAxis
+                        dataKey="label"
+                        tick={{ ...AXIS_STYLE, fontSize: 10 }}
+                        interval={0}
+                        angle={-18}
+                        textAnchor="end"
+                        height={52}
+                      />
+                      <YAxis tick={{ ...AXIS_STYLE, fontSize: 10 }} width={36} />
+                      <Tooltip content={StackHoursTooltip} wrapperStyle={TOOLTIP_WRAPPER_STYLE} />
+                      <Legend
+                        wrapperStyle={{ ...LEGEND_STYLE, fontSize: 10 }}
+                        formatter={(v) => <span style={{ color: theme.text }}>{v}</span>}
+                      />
+                      {custStack.people.map((p, idx) => (
+                        <Bar
+                          key={p.id}
+                          dataKey={`h_${p.id}`}
+                          name={p.shortName}
+                          stackId="cust"
+                          fill={p.color}
+                          radius={idx === custStack.people.length - 1 ? BAR_RADIUS_TOP : [0, 0, 0, 0]}
+                        />
+                      ))}
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+              )}
+            </ChartCard>
+          </div>
+        </div>
       </div>
+    </div>
+  );
+}
 
-      <ChartCard title="Timmar per kund" subtitle="Staplar per person (färg). Tabellen under visar samma data med namn." compact>
-        {custStack.rows.length === 0 ? (
-          <EmptyChart compact>Ingen kund med timmar.</EmptyChart>
-        ) : (
-          <ResponsiveContainer width="100%" height={Math.max(200, custStack.rows.length * 36)}>
-            <BarChart data={custStack.rows} margin={{ left: 4, right: 8, top: 4, bottom: 40 }}>
-              <CartesianGrid {...GRID_STYLE} strokeDasharray="3 3" />
-              <XAxis
-                dataKey="label"
-                tick={{ ...AXIS_STYLE, fontSize: 10 }}
-                interval={0}
-                angle={-18}
-                textAnchor="end"
-                height={52}
-              />
-              <YAxis tick={{ ...AXIS_STYLE, fontSize: 10 }} width={36} />
-              <Tooltip content={StackHoursTooltip} wrapperStyle={TOOLTIP_WRAPPER_STYLE} />
-              <Legend
-                wrapperStyle={{ ...LEGEND_STYLE, fontSize: 10 }}
-                formatter={(v) => <span style={{ color: theme.text }}>{v}</span>}
-              />
-              {custStack.people.map((p) => (
-                <Bar key={p.id} dataKey={`h_${p.id}`} name={p.shortName} stackId="cust" fill={p.color} />
-              ))}
-            </BarChart>
-          </ResponsiveContainer>
-        )}
-      </ChartCard>
-
-      <ChartCard title="Timmar per internt projekt" subtitle="Staplar per person. Tabellen under listar vem som lagt timmarna." compact>
-        {projStack.rows.length === 0 ? (
-          <EmptyChart compact>Inga timmar på interna projekt.</EmptyChart>
-        ) : (
-          <ResponsiveContainer width="100%" height={Math.max(190, projStack.rows.length * 34)}>
-            <BarChart data={projStack.rows} margin={{ left: 4, right: 8, top: 4, bottom: 40 }}>
-              <CartesianGrid {...GRID_STYLE} strokeDasharray="3 3" />
-              <XAxis
-                dataKey="label"
-                tick={{ ...AXIS_STYLE, fontSize: 10 }}
-                interval={0}
-                angle={-18}
-                textAnchor="end"
-                height={52}
-              />
-              <YAxis tick={{ ...AXIS_STYLE, fontSize: 10 }} width={36} />
-              <Tooltip content={StackHoursTooltip} wrapperStyle={TOOLTIP_WRAPPER_STYLE} />
-              <Legend
-                wrapperStyle={{ ...LEGEND_STYLE, fontSize: 10 }}
-                formatter={(v) => <span style={{ color: theme.text }}>{v}</span>}
-              />
-              {projStack.people.map((p) => (
-                <Bar key={p.id} dataKey={`h_${p.id}`} name={p.shortName} stackId="ip" fill={p.color} />
-              ))}
-            </BarChart>
-          </ResponsiveContainer>
-        )}
-      </ChartCard>
-
+function DashboardDonutSegment({ title, children, footer }) {
+  return (
+    <div
+      style={{
+        ...DASH_SEGMENT,
+        padding: "14px 12px 16px",
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        textAlign: "center",
+        minWidth: 0,
+      }}
+    >
       <div
         style={{
-          fontSize: 10,
+          fontSize: 13,
           fontWeight: 700,
-          color: theme.textSoft,
-          textTransform: "uppercase",
-          letterSpacing: 0.8,
-          margin: "14px 0 8px",
+          color: theme.text,
+          marginBottom: 10,
+          lineHeight: 1.25,
+          letterSpacing: "-0.02em",
         }}
       >
-        Detaljer (tabell)
+        {title}
       </div>
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))", gap: 10 }}>
-        <MiniTable title="Per person" rows={tm.perPerson} type="person" />
-        <HoursBreakdownTable title="Timmar per kund" subtitle="Totalt och fördelning per person" stack={custStack} budgetByCustomerId={Object.fromEntries(custCols.map((c) => [c.customer.id, c.budgetTimmar]))} showBudget />
-        <HoursBreakdownTable title="Timmar per internt projekt" subtitle="Totalt och fördelning per person" stack={projStack} />
-        <MiniTable title="Drift" driftCols={driftCols} />
-      </div>
+      {children}
+      {footer}
     </div>
   );
 }
@@ -395,257 +411,261 @@ function DepartmentDonutRow({ deptBars }) {
   return (
     <div
       style={{
-        display: "flex",
-        flexWrap: "wrap",
+        display: "grid",
+        gridTemplateColumns: "repeat(auto-fill, minmax(152px, 1fr))",
         gap: 12,
-        alignItems: "flex-start",
-        justifyContent: "flex-start",
+        alignItems: "stretch",
       }}
     >
       {deptBars.map((d) => {
         if (wholeHours(d.capacity) <= 0) {
           return (
-            <div key={d.fullName} style={{ width: 128, flexShrink: 0, textAlign: "center" }}>
-              <div style={{ fontSize: 11, fontWeight: 700, color: theme.text, marginBottom: 4 }}>{d.name}</div>
-              <div style={{ fontSize: 10, color: theme.textSoft }}>Ingen kapacitet</div>
-            </div>
+            <DashboardDonutSegment
+              key={d.fullName}
+              title={d.name}
+              footer={
+                <div style={{ fontSize: 10, color: theme.textMuted, marginTop: 10 }}>Ingen kapacitet</div>
+              }
+            >
+              <div style={{ height: 120, display: "flex", alignItems: "center", color: theme.textSoft, fontSize: 11 }}>
+                —
+              </div>
+            </DashboardDonutSegment>
           );
         }
         const slices = [
-          { name: "Ledigt", value: d.Ledigt, color: LEDIG_STACK_FILL },
-          { name: "Allokerat", value: d.Allokerat, color: d.deptColor || theme.billable },
+          { name: "Ledigt", value: d.Ledigt, color: CAPACITY_TRACK_FILL },
+          { name: "Belagt", value: d.Allokerat, color: d.deptColor || theme.billable },
           { name: "Över kap.", value: d.Överkap, color: theme.danger },
         ].filter((s) => s.value > 0);
         return (
-          <div
+          <DashboardDonutSegment
             key={d.fullName}
-            style={{
-              width: 128,
-              flexShrink: 0,
-              textAlign: "center",
-            }}
+            title={d.name}
+            footer={
+              <div style={{ fontSize: 11, color: theme.textMuted, marginTop: 10, fontFamily: font, fontWeight: 600 }}>
+                {pct(d.rate)} beläggning
+              </div>
+            }
           >
-            <div
-              style={{
-                fontSize: 11,
-                fontWeight: 700,
-                color: theme.text,
-                marginBottom: 4,
-                lineHeight: 1.2,
-                minHeight: 28,
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-              }}
-            >
-              {d.name}
+            <div style={{ width: "100%", maxWidth: 132, height: 124 }}>
+              <ResponsiveContainer width="100%" height="100%">
+                <PieChart margin={{ top: 2, right: 2, bottom: 2, left: 2 }}>
+                  <Pie
+                    data={slices}
+                    dataKey="value"
+                    nameKey="name"
+                    cx="50%"
+                    cy="50%"
+                    innerRadius={38}
+                    outerRadius={54}
+                    paddingAngle={slices.length > 1 ? 1.2 : 0}
+                    label={false}
+                    stroke="rgba(20, 16, 32, 0.9)"
+                    strokeWidth={1.5}
+                  >
+                    {slices.map((s) => (
+                      <Cell key={s.name} fill={s.color} />
+                    ))}
+                  </Pie>
+                  <Tooltip
+                    {...chartTooltipProps()}
+                    formatter={(v, n) => [`${formatHours(v)} h`, n]}
+                    labelFormatter={() =>
+                      `${d.fullName} · Kap ${formatHours(d.capacity)} h · Allok ${formatHours(d.allocated)} h`
+                    }
+                  />
+                </PieChart>
+              </ResponsiveContainer>
             </div>
-            <ResponsiveContainer width="100%" height={112}>
-              <PieChart margin={{ top: 0, right: 0, bottom: 0, left: 0 }}>
-                <Pie
-                  data={slices}
-                  dataKey="value"
-                  nameKey="name"
-                  cx="50%"
-                  cy="50%"
-                  innerRadius={34}
-                  outerRadius={50}
-                  paddingAngle={slices.length > 1 ? 1.5 : 0}
-                  label={false}
-                  stroke={theme.bgDeep}
-                  strokeWidth={1}
-                >
-                  {slices.map((s) => (
-                    <Cell key={s.name} fill={s.color} />
-                  ))}
-                </Pie>
-                <Tooltip
-                  {...chartTooltipProps()}
-                  formatter={(v, n) => [`${formatHours(v)} h`, n]}
-                  labelFormatter={() =>
-                    `${d.fullName} · Kap ${formatHours(d.capacity)} h · Allok ${formatHours(d.allocated)} h`
-                  }
-                />
-              </PieChart>
-            </ResponsiveContainer>
-            <div style={{ fontSize: 10, color: theme.textMuted, marginTop: 2, fontFamily: font }}>
-              {pct(d.rate)} beläggning
-            </div>
-          </div>
+          </DashboardDonutSegment>
         );
       })}
     </div>
   );
 }
 
-function HoursBreakdownTable({ title, subtitle, stack, budgetByCustomerId, showBudget }) {
-  const rows = stack?.rows ?? [];
-  const people = stack?.people ?? [];
+/** Ledig tid till vänster (personfärg), därefter planerat och över kap. Skala = största radens timmar. */
+function PersonFreeCapacityBarChart({ personBars }) {
+  const rows = [...personBars].sort((a, b) => b.Ledigt - a.Ledigt || a.name.localeCompare(b.name));
+  const maxSpan = Math.max(1, ...rows.map((d) => d.Ledigt + d.Allokerat + d.Överkap));
+
   return (
-    <div
-      style={{
-        border: `1px solid ${theme.border}`,
-        borderRadius: 12,
-        overflow: "hidden",
-        background: theme.bgDeep,
-      }}
-    >
+    <div style={{ padding: "6px 0 4px" }}>
       <div
         style={{
-          padding: "12px 14px",
-          borderBottom: `1px solid ${theme.border}`,
-          fontWeight: 700,
-          fontSize: 13,
-          color: theme.text,
+          display: "grid",
+          gridTemplateColumns: "minmax(96px, 118px) minmax(0, 1fr) auto",
+          columnGap: 10,
+          rowGap: 14,
+          alignItems: "center",
         }}
       >
-        {title}
-        {subtitle ? (
-          <div style={{ fontSize: 10, color: theme.textMuted, marginTop: 4, fontWeight: 500, lineHeight: 1.35 }}>
-            {subtitle}
-          </div>
-        ) : null}
+        {rows.map((row) => {
+          const span = row.Ledigt + row.Allokerat + row.Överkap;
+          const trackFrac = span / maxSpan;
+          const tip = `${row.fullName} — Kap ${formatHours(row.cap)} h, planerat ${formatHours(row.alloc)} h, ledigt ${formatHours(row.Ledigt)} h`;
+          return (
+            <Fragment key={row.fullName}>
+              <div
+                title={tip}
+                style={{
+                  fontSize: 11,
+                  fontWeight: 600,
+                  color: theme.text,
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                {row.name}
+              </div>
+              <div
+                title={tip}
+                style={{
+                  minWidth: 0,
+                  height: 24,
+                  borderRadius: 8,
+                  background: DASH_SEGMENT.background,
+                  border: DASH_SEGMENT.border,
+                  display: "flex",
+                  alignItems: "stretch",
+                  overflow: "hidden",
+                }}
+              >
+                <div
+                  style={{
+                    width: `${trackFrac * 100}%`,
+                    minWidth: span > 0 ? 2 : 0,
+                    display: "flex",
+                    height: "100%",
+                    overflow: "hidden",
+                    borderRadius: 6,
+                  }}
+                >
+                  {row.Ledigt > 0 ? (
+                    <div
+                      style={{
+                        flexGrow: row.Ledigt,
+                        flexShrink: 0,
+                        flexBasis: 0,
+                        minWidth: 0,
+                        background: row.color,
+                        boxShadow: "inset 0 1px 0 rgba(255,255,255,0.14)",
+                      }}
+                    />
+                  ) : null}
+                  {row.Allokerat > 0 ? (
+                    <div
+                      style={{
+                        flexGrow: row.Allokerat,
+                        flexShrink: 0,
+                        flexBasis: 0,
+                        minWidth: 0,
+                        background: CAPACITY_TRACK_FILL,
+                      }}
+                    />
+                  ) : null}
+                  {row.Överkap > 0 ? (
+                    <div
+                      style={{
+                        flexGrow: row.Överkap,
+                        flexShrink: 0,
+                        flexBasis: 0,
+                        minWidth: 0,
+                        background: theme.danger,
+                      }}
+                    />
+                  ) : null}
+                </div>
+              </div>
+              <div
+                title={tip}
+                style={{
+                  fontFamily: font,
+                  fontSize: 11,
+                  fontWeight: 700,
+                  color: row.Ledigt > 0 ? row.color : theme.textSoft,
+                  whiteSpace: "nowrap",
+                }}
+              >
+                {formatHours(row.Ledigt)} h
+              </div>
+            </Fragment>
+          );
+        })}
       </div>
-      <div style={{ overflowX: "auto", maxHeight: 260, overflowY: "auto" }}>
-        {rows.length === 0 ? (
-          <div style={{ padding: 14, color: theme.textMuted, fontSize: 12 }}>Ingen data för vald månad.</div>
-        ) : (
-          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
-            <thead>
-              <tr>
-                <th style={mth}>{showBudget ? "Kund" : "Projekt"}</th>
-                <th style={{ ...mth, textAlign: "right" }}>Tot</th>
-                <th style={mth}>Fördelning</th>
-                {showBudget ? <th style={{ ...mth, textAlign: "right" }}>Budget</th> : null}
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((row) => {
-                const parts = people
-                  .map((p) => ({ p, h: Number(row[`h_${p.id}`]) || 0 }))
-                  .filter((x) => x.h > 0)
-                  .sort((a, b) => b.h - a.h)
-                  .map((x) => `${x.p.shortName}: ${formatHours(x.h)} h`);
-                const total = people.reduce((s, p) => s + (Number(row[`h_${p.id}`]) || 0), 0);
-                const budget =
-                  showBudget && budgetByCustomerId && row.refId != null
-                    ? budgetByCustomerId[row.refId]
-                    : null;
-                return (
-                  <tr key={row.refId ?? row.label}>
-                    <td style={mtd}>{row.label}</td>
-                    <td style={mtdNum}>{formatHours(total)}</td>
-                    <td style={{ ...mtd, fontSize: 10, color: theme.textMuted, lineHeight: 1.35 }}>
-                      {parts.length ? parts.join(" · ") : "—"}
-                    </td>
-                    {showBudget ? (
-                      <td style={mtdNum}>{budget != null && budget > 0 ? formatHours(budget) : "—"}</td>
-                    ) : null}
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        )}
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "minmax(96px, 118px) minmax(0, 1fr) auto",
+          columnGap: 10,
+          alignItems: "center",
+          marginTop: 10,
+        }}
+      >
+        <div />
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "space-between",
+            fontSize: 10,
+            color: theme.textMuted,
+            fontFamily: font,
+          }}
+        >
+          <span>0 h</span>
+          <span>{formatHours(maxSpan)} h</span>
+        </div>
+        <div />
+      </div>
+      <div
+        style={{
+          display: "flex",
+          flexWrap: "wrap",
+          gap: "8px 16px",
+          fontSize: 10,
+          color: theme.textSoft,
+          marginTop: 10,
+          lineHeight: 1.4,
+        }}
+      >
+        <span>
+          <span style={{ color: theme.accentMint }}>■</span> Ledigt (personfärg)
+        </span>
+        <span>
+          <span style={{ color: CAPACITY_TRACK_FILL }}>■</span> Planerat
+        </span>
+        <span>
+          <span style={{ color: theme.danger }}>■</span> Över kap.
+        </span>
       </div>
     </div>
   );
 }
 
-function MiniTable({ title, rows, type, driftCols }) {
+function ChartCard({ title, subtitle, children, compact, fillHeight }) {
+  const pad = compact ? "12px 14px 10px" : "16px 16px 8px";
+  const titleSize = compact ? 14 : 15;
+  const subMb = compact ? 8 : 12;
+  const titleMb = subtitle ? (compact ? 4 : 4) : compact ? 8 : 12;
   return (
     <div
       style={{
-        border: `1px solid ${theme.border}`,
-        borderRadius: 12,
-        overflow: "hidden",
-        background: theme.bgDeep,
-      }}
-    >
-      <div
-        style={{
-          padding: "12px 14px",
-          borderBottom: `1px solid ${theme.border}`,
-          fontWeight: 700,
-          fontSize: 13,
-          color: theme.text,
-        }}
-      >
-        {title}
-      </div>
-      <div style={{ overflowX: "auto", maxHeight: 220, overflowY: "auto" }}>
-        {type === "person" && rows ? (
-          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
-            <thead>
-              <tr>
-                {["Namn", "Kap", "Tot", "%"].map((h) => (
-                  <th key={h} style={mth}>
-                    {h}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((r) => (
-                <tr key={r.person.id}>
-                  <td style={mtd}>{r.person.name}</td>
-                  <td style={mtdNum}>{r.kapacitet}</td>
-                  <td style={mtdNum}>{formatHours(r.total)}</td>
-                  <td style={mtdNum}>{pct(r.allocationRate)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        ) : null}
-        {driftCols ? (
-          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
-            <thead>
-              <tr>
-                {["Kategori", "Plan"].map((h) => (
-                  <th key={h} style={mth}>
-                    {h}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {driftCols.map((c) => (
-                <tr key={c.drift.id}>
-                  <td style={mtd}>{c.drift.name}</td>
-                  <td style={mtdNum}>{formatHours(c.planerade)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        ) : null}
-      </div>
-    </div>
-  );
-}
-
-const mth = {
-  textAlign: "left",
-  padding: "6px 8px",
-  color: theme.textSoft,
-  fontSize: 8,
-  textTransform: "uppercase",
-};
-const mtd = { padding: "6px 8px", borderTop: `1px solid ${theme.border}`, color: theme.text, fontSize: 11 };
-const mtdNum = { ...mtd, textAlign: "right", fontFamily: font, fontSize: 11 };
-
-function ChartCard({ title, subtitle, children, compact }) {
-  const pad = compact ? "10px 12px 6px" : "16px 16px 8px";
-  const titleSize = compact ? 13 : 14;
-  const subMb = compact ? 6 : 12;
-  const titleMb = subtitle ? (compact ? 3 : 4) : compact ? 6 : 12;
-  return (
-    <div
-      style={{
-        background: theme.surface,
-        borderRadius: compact ? 12 : 14,
-        border: `1px solid ${theme.border}`,
+        background: "rgba(30, 26, 46, 0.55)",
+        borderRadius: compact ? 14 : 16,
+        border: "1px solid rgba(110, 100, 150, 0.14)",
         padding: pad,
-        marginBottom: compact ? 8 : 0,
+        marginBottom: compact && !fillHeight ? 10 : 0,
+        ...(fillHeight
+          ? {
+              flex: 1,
+              display: "flex",
+              flexDirection: "column",
+              minHeight: 0,
+              height: "100%",
+            }
+          : {}),
       }}
     >
       <div
@@ -658,16 +678,30 @@ function ChartCard({ title, subtitle, children, compact }) {
           {subtitle}
         </div>
       ) : null}
-      {children}
+      {fillHeight ? (
+        <div
+          style={{
+            flex: 1,
+            minHeight: 0,
+            display: "flex",
+            flexDirection: "column",
+            minWidth: 0,
+          }}
+        >
+          {children}
+        </div>
+      ) : (
+        children
+      )}
     </div>
   );
 }
 
-function EmptyChart({ children, compact }) {
+function EmptyChart({ children, compact, fillMinHeight }) {
   return (
     <div
       style={{
-        height: compact ? 100 : 220,
+        height: fillMinHeight != null ? fillMinHeight : compact ? 100 : 220,
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
@@ -678,36 +712,6 @@ function EmptyChart({ children, compact }) {
       }}
     >
       {children}
-    </div>
-  );
-}
-
-function DashKpi({ label, value, color, hint }) {
-  return (
-    <div
-      style={{
-        background: theme.surface2,
-        borderRadius: 10,
-        padding: "8px 10px",
-        border: `1px solid ${theme.border}`,
-      }}
-    >
-      <div style={{ fontSize: 9, color: theme.textSoft, marginBottom: 2 }}>{label}</div>
-      <div style={{ fontSize: 13, fontWeight: 800, fontFamily: font, color: color ?? theme.text }}>{value}</div>
-      {hint ? (
-        <div
-          style={{
-            fontSize: 9,
-            fontWeight: 600,
-            fontFamily: font,
-            color: theme.textSoft,
-            marginTop: 3,
-            lineHeight: 1.2,
-          }}
-        >
-          {hint}
-        </div>
-      ) : null}
     </div>
   );
 }

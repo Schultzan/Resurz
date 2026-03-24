@@ -83,71 +83,66 @@ function allocColor(w) {
   return theme.ok;
 }
 
-/** En segment = planerade timmar med färg (t.ex. per kund/projekt). */
-function allocationBarSegments(personId, activeCustomers, activeInternal, driftCategories, getCellHours) {
-  const segs = [];
-  for (const c of activeCustomers) {
-    const value = getCellHours(personId, "customer", c.id);
-    if (value > 0) segs.push({ value, color: c.color || COL_CUSTOMER });
-  }
-  for (const p of activeInternal) {
-    const value = getCellHours(personId, "internalProject", p.id);
-    if (value > 0) segs.push({ value, color: p.color || COL_INTERNAL });
-  }
-  for (const d of driftCategories) {
-    const value = getCellHours(personId, "internalDrift", d.id);
-    if (value > 0) segs.push({ value, color: d.color || COL_DRIFT });
-  }
-  return segs;
-}
-
-/** Stacked hours bar as % of capacity (clamped display for over-capacity) */
-function HoursBar({ segments, capacity, height = 6 }) {
-  const cap = Math.max(0.01, capacity);
-  const total = segments.reduce((s, x) => s + x.value, 0);
-  if (total <= 0) {
+/** En färg för allokerad tid; tomt utrymme = kvar av kapacitet. Timmar efter stapeln. */
+function SidebarPersonCapacityBar({ allocated, capacity }) {
+  const cap = wholeHours(capacity);
+  const total = wholeHours(allocated);
+  const h = 5;
+  if (cap <= 0) {
     return (
-      <div
-        style={{
-          display: "flex",
-          height,
-          borderRadius: 999,
-          background: theme.surface2,
-          width: "100%",
-        }}
-      />
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <div
+          style={{
+            flex: 1,
+            height: h,
+            borderRadius: 999,
+            background: theme.surface2,
+          }}
+        />
+        <span style={{ fontSize: 10, fontFamily: font, color: theme.textSoft, flexShrink: 0 }}>—</span>
+      </div>
     );
   }
-  const scale = total > cap ? cap / total : 1;
-  const seg = segments.map((x) => ({ v: Math.max(0, x.value) * scale, c: x.color }));
-  const shownPct = Math.min(100, (total / cap) * 100);
+  const free = Math.max(0, cap - total);
+  const over = Math.max(0, total - cap);
+  const usedPct = Math.min(100, (total / cap) * 100);
+  const fillColor = over > 0 ? theme.danger : theme.ok;
+  const afterLabel = over > 0 ? `${formatHours(over)} h över` : `${formatHours(free)} h kvar`;
+  const afterColor = over > 0 ? theme.danger : free <= 0 ? theme.ok : theme.warn;
   return (
-    <div
-      style={{
-        display: "flex",
-        height,
-        borderRadius: 999,
-        overflow: "hidden",
-        background: theme.surface2,
-        width: "100%",
-      }}
-    >
-      {seg.map((s, i) =>
-        s.v > 0 ? (
-          <div
-            key={i}
-            style={{
-              width: `${(s.v / cap) * 100}%`,
-              background: s.c,
-              transition: "width 0.2s ease",
-              boxShadow: "inset 0 1px 0 rgba(255,255,255,0.12)",
-            }}
-          />
-        ) : null
-      )}
-      {shownPct < 100 && total <= cap && (
-        <div style={{ flex: 1, minWidth: `${100 - (total / cap) * 100}%`, background: "transparent" }} />
-      )}
+    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+      <div
+        style={{
+          flex: 1,
+          minWidth: 0,
+          height: h,
+          borderRadius: 999,
+          background: theme.surface2,
+          overflow: "hidden",
+        }}
+      >
+        <div
+          style={{
+            width: over > 0 ? "100%" : `${usedPct}%`,
+            height: "100%",
+            background: fillColor,
+            boxShadow: "inset 0 1px 0 rgba(255,255,255,0.12)",
+            transition: "width 0.18s ease",
+          }}
+        />
+      </div>
+      <span
+        style={{
+          fontSize: 10,
+          fontWeight: 800,
+          fontFamily: font,
+          color: afterColor,
+          flexShrink: 0,
+          whiteSpace: "nowrap",
+        }}
+      >
+        {afterLabel}
+      </span>
     </div>
   );
 }
@@ -825,7 +820,7 @@ export function PlanningView({
                       transition: "background 0.15s",
                     }}
                   >
-                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 5 }}>
+                    <div style={{ display: "flex", alignItems: "center", marginBottom: 6 }}>
                       <span
                         style={{
                           display: "flex",
@@ -847,6 +842,7 @@ export function PlanningView({
                           }}
                         />
                         <span
+                          title={`${formatHours(st.total)} / ${formatHours(st.cap)} h planerat`}
                           style={{
                             fontSize: 14,
                             fontWeight: 600,
@@ -860,35 +856,8 @@ export function PlanningView({
                           {person.name}
                         </span>
                       </span>
-                      <span
-                        style={{
-                          fontSize: 11,
-                          fontWeight: 800,
-                          fontFamily: font,
-                          color:
-                            st.total > st.cap
-                              ? theme.danger
-                              : st.total === st.cap
-                                ? theme.ok
-                                : st.total === 0
-                                  ? theme.textSoft
-                                  : theme.warn,
-                        }}
-                      >
-                        {st.total.toFixed(0)}/{st.cap}h
-                      </span>
                     </div>
-                    <HoursBar
-                      segments={allocationBarSegments(
-                        person.id,
-                        activeCustomers,
-                        activeInternal,
-                        driftCategories,
-                        getCellHours
-                      )}
-                      capacity={st.cap}
-                      height={4}
-                    />
+                    <SidebarPersonCapacityBar allocated={st.total} capacity={st.cap} />
                   </button>
                 );
               })}
