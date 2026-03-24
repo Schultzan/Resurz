@@ -786,11 +786,11 @@ function SettingsSection({ workspace, updateSettings, fontMono }) {
           maxWidth: 440,
         }}
       >
-        <strong style={{ color: "#cbd5e1" }}>Självkostnadspris (kr/h)</strong> beräknas på dashboarden som (löner +
-        övrigt) delat med snittfakturerbara timmar per månad. Snittet bygger på{" "}
-        <strong style={{ color: "#cbd5e1" }}>vald månads planerade timmar på aktiva kundkolumner</strong> för varje
-        person × <strong style={{ color: "#cbd5e1" }}>11</strong> (en månad borträknad) / <strong style={{ color: "#cbd5e1" }}>12</strong>.{" "}
-        Interna projekt och intern drift räknas inte som fakturerbart underlag.
+        <strong style={{ color: "#cbd5e1" }}>Självkostnadspris (kr/h)</strong> beräknas som{" "}
+        <strong style={{ color: "#cbd5e1" }}>(löner + övrigt per månad)</strong> delat med{" "}
+        <strong style={{ color: "#cbd5e1" }}>summan av planerade timmar på aktiva kundkolumner</strong> för vald månad
+        (samma underlag som ”Fakturerbart” i teamraden). Interna projekt och intern drift räknas inte som
+        fakturerbart underlag.
       </div>
       {driftCats.length > 0 ? (
         <label style={{ display: "block" }}>

@@ -106,18 +106,28 @@ export function teamMetrics(workspace, monthId) {
     const cap = p.kapacitetPerManad;
     teamkapacitet += cap;
     const b = personHourBreakdown(monthAlloc, p.id, customersById);
-    teamFakturerbara += b.billable;
+    const billableKpi = personBillableCustomerHours(monthAlloc, p.id, workspace);
+    teamFakturerbara += billableKpi;
     teamInternProj += b.internalProject;
     teamInternDrift += b.internalDrift;
-    teamIntakt += b.revenue;
-    const d = personDerived(b, cap);
+    const bKpi = { ...b, billable: billableKpi };
+    const d = personDerived(bKpi, cap);
     perPerson.push({
       person: p,
       ...b,
+      billable: billableKpi,
       ...d,
       kapacitet: cap,
       malFakturerbara: p.malFakturerbaraTimmar,
     });
+  }
+
+  /** Intäkt (KPI): budget + fast månadsintäkt per aktiv kund — samma tänk som fasta månadsrader i Excel (ej timmar × pris). */
+  for (const c of customers) {
+    if (c.active === false) continue;
+    const budget = Math.max(0, Math.round(Number(c.budgetPerManad) || 0));
+    const fast = Math.max(0, Math.round(Number(c.fastManadsintaktKr) || 0));
+    teamIntakt += budget + fast;
   }
 
   const teamTot = teamFakturerbara + teamInternProj + teamInternDrift;
@@ -137,7 +147,6 @@ export function teamMetrics(workspace, monthId) {
     teamBillGrad,
     teamIntakt,
     perPerson,
-    standardMal: settings.standardMalFakturerbaraTimmar,
   };
 }
 
@@ -159,15 +168,21 @@ export function personBillableCustomerHours(monthAlloc, personId, workspace) {
 }
 
 /**
- * Självkostnad kr/h enligt månadskostnader och fakturerbara timmar (aktiva kunder).
- * Årsvolym av fakturerbara timmar = summa över personer (timmar vald månad × 11 lediga månader).
- * Snitt per kalendermånad = den volymen / 12 (kostnader löper 12 månader).
+ * Självkostnad kr/h: (löner + övrigt för månaden) / fakturerbara timmar samma månad (aktiva kundkolumner).
+ * Samma tänk som typisk Excel: total månadskostnad delat med faktureringsbara timmar — ingen ×11/12-justering.
+ *
+ * krPerHourAtFullCustomerBudget: samma täljare men nämnare = summan av budget→timmar (budget÷timpris) för aktiva kunder.
  *
  * @returns {{
  *   monthlyBurn: number,
+ *   monthlyBillableHours: number,
  *   yearlyBillableHours: number,
  *   avgMonthlyBillableHours: number,
  *   krPerHour: number | null,
+ *   budgetBillableHoursPerMonth: number,
+ *   yearlyBillableHoursAtFullCustomerBudget: number,
+ *   avgMonthlyBillableAtFullCustomerBudget: number,
+ *   krPerHourAtFullCustomerBudget: number | null,
  * }}
  */
 export function costPriceMetrics(workspace, monthId) {
@@ -179,20 +194,37 @@ export function costPriceMetrics(workspace, monthId) {
   const monthAlloc = allocationsForMonth(workspace.allocations || [], monthId);
   const activePeople = (workspace.people || []).filter((p) => p.active !== false);
 
-  let yearlyBillableHours = 0;
+  let monthlyBillableHours = 0;
   for (const p of activePeople) {
-    const billable = personBillableCustomerHours(monthAlloc, p.id, workspace);
-    yearlyBillableHours += billable * 11;
+    monthlyBillableHours += personBillableCustomerHours(monthAlloc, p.id, workspace);
   }
-  const avgMonthlyBillableHours = yearlyBillableHours / 12;
+  monthlyBillableHours = wholeHours(monthlyBillableHours);
+
   const krPerHour =
-    monthlyBurn > 0 && avgMonthlyBillableHours > 0 ? monthlyBurn / avgMonthlyBillableHours : null;
+    monthlyBurn > 0 && monthlyBillableHours > 0 ? monthlyBurn / monthlyBillableHours : null;
+
+  const activeCustomers = (workspace.customers || []).filter((c) => c.active !== false);
+  let budgetBillableHoursPerMonth = 0;
+  for (const c of activeCustomers) {
+    budgetBillableHoursPerMonth += customerBudgetTimmar(c);
+  }
+  budgetBillableHoursPerMonth = wholeHours(budgetBillableHoursPerMonth);
+  const yearlyBillableHoursAtFullCustomerBudget = budgetBillableHoursPerMonth * 11;
+  const krPerHourAtFullCustomerBudget =
+    monthlyBurn > 0 && budgetBillableHoursPerMonth > 0
+      ? monthlyBurn / budgetBillableHoursPerMonth
+      : null;
 
   return {
     monthlyBurn,
-    yearlyBillableHours,
-    avgMonthlyBillableHours,
+    monthlyBillableHours,
+    yearlyBillableHours: monthlyBillableHours * 11,
+    avgMonthlyBillableHours: monthlyBillableHours,
     krPerHour,
+    budgetBillableHoursPerMonth,
+    yearlyBillableHoursAtFullCustomerBudget,
+    avgMonthlyBillableAtFullCustomerBudget: budgetBillableHoursPerMonth,
+    krPerHourAtFullCustomerBudget,
     lonerKr: lon,
     ovrigtKr: ovr,
   };
@@ -213,14 +245,14 @@ export function columnPlannedHours(monthAlloc, categoryType, refId) {
 export function customerColumnMetrics(workspace, monthId) {
   const { customers, allocations, settings } = workspace;
   const monthAlloc = allocationsForMonth(allocations, monthId);
-  const mal = settings.standardMalFakturerbaraTimmar;
+  const malRef = Math.max(0, Number(settings.standardTimmarInternAnnat) || 0);
 
   return customers
     .filter((c) => c.active !== false)
     .map((c) => {
       const planerade = columnPlannedHours(monthAlloc, "customer", c.id);
       const budgetT = customerBudgetTimmar(c);
-      const budgetFTE = customerBudgetFTE(c, mal);
+      const budgetFTE = customerBudgetFTE(c, malRef);
       const diff = planerade - budgetT;
       const intakt = planerade * (c.timpris > 0 ? c.timpris : 0);
       let budgetWarning = "ok";
