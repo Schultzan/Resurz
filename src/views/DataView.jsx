@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { normalizeHex } from "../domain/entityColors.js";
+import { normalizeHex, RESURZ_UI_PALETTE } from "../domain/entityColors.js";
 import { theme } from "../theme.js";
 
 const bodyFont = theme.fontSans;
@@ -8,7 +8,7 @@ const font = theme.fontMono;
 const SECTION_META = {
   team: {
     title: "Team",
-    blurb: "Personer, kapacitet per månad och avdelning används i planering och dashboard.",
+    blurb: "Personer, kapacitet per månad och avdelning används i planering och dashboard. Varje person får en unik färg från appens gemensamma palett (syns i spår och diagram) — tilldelas automatiskt per person.",
   },
   departments: {
     title: "Avdelningar",
@@ -16,7 +16,8 @@ const SECTION_META = {
   },
   customers: {
     title: "Kunder",
-    blurb: "Kundrader styr kolumner i planeringen; timpris och budget används för timtak.",
+    blurb:
+      "Kundrader styr kolumner i planeringen; timpris och budget används för timtak. Intäkt och marginal på dashboarden summerar per aktiv kund: budget per månad + fast månadsintäkt (samma tänk som fasta månadsrader i Excel), utan att räkna timmar × pris. Beläggning och timmar påverkas bara av planeringen.",
   },
   internal: {
     title: "Interna projekt",
@@ -30,7 +31,7 @@ const SECTION_META = {
   settings: {
     title: "Standardvärden",
     blurb:
-      "Kapacitet och mål för nya personer, månadskostnader för självkostnadspris, vilken driftpost som får global förtätning av timmar, m.m. Färger för kunder, interna projekt, drift och avdelningar finns under respektive flik.",
+      "Kapacitet för nya personer, månadskostnader för självkostnadspris, vilken driftpost som får global förtätning av timmar, m.m. Färger för kunder, interna projekt, drift och avdelningar kan justeras under respektive flik; personfärger tilldelas automatiskt.",
   },
 };
 
@@ -189,7 +190,7 @@ export function DataView({
 function TeamSection({ people, departments, settings, addPerson, updatePerson, removePerson }) {
   const [name, setName] = useState("");
   const [cap, setCap] = useState(settings.standardKapacitetPerManad);
-  const [mal, setMal] = useState(settings.standardMalFakturerbaraTimmar);
+  const [mal, setMal] = useState(0);
   const [deptId, setDeptId] = useState("");
   const [err, setErr] = useState("");
 
@@ -214,7 +215,7 @@ function TeamSection({ people, departments, settings, addPerson, updatePerson, r
     setName("");
     setDeptId("");
     setCap(settings.standardKapacitetPerManad);
-    setMal(settings.standardMalFakturerbaraTimmar);
+    setMal(0);
   };
 
   return (
@@ -365,7 +366,7 @@ function DepartmentsSection({ departments, addDepartment, updateDepartment, remo
     <div>
       <p style={{ fontSize: 14, color: "#888", marginBottom: 16 }}>
         Avdelningar används som tagg per person och för grafer i dashboard (kapacitet och beläggning per avdelning).
-        Varje avdelning har en egen färg (ändras med färgfältet) så den inte förväxlas med kunder eller interna projekt.
+        Varje avdelning har en egen färg (ändras med färgfältet) så den inte förväxlas med personer, kunder, drift eller interna projekt.
       </p>
       <div style={{ padding: 20, background: "#12122a", borderRadius: 12, border: "1px solid #ffffff08", marginBottom: 24 }}>
         <div style={{ fontWeight: 700, marginBottom: 12 }}>Ny avdelning</div>
@@ -393,7 +394,7 @@ function DepartmentsSection({ departments, addDepartment, updateDepartment, remo
 }
 
 function DepartmentRow({ department, updateDepartment, removeDepartment }) {
-  const colorVal = normalizeHex(department.color) || "#64748b";
+  const colorVal = normalizeHex(department.color) || RESURZ_UI_PALETTE[0];
 
   return (
     <div
@@ -435,6 +436,7 @@ function CustomersSection({ customers, addCustomer, updateCustomer, removeCustom
   const [name, setName] = useState("");
   const [timpris, setTimpris] = useState(1000);
   const [budget, setBudget] = useState(0);
+  const [fastIntakt, setFastIntakt] = useState(0);
   const [err, setErr] = useState("");
 
   const submit = () => {
@@ -448,7 +450,7 @@ function CustomersSection({ customers, addCustomer, updateCustomer, removeCustom
       return;
     }
     setErr("");
-    addCustomer({ name: n, timpris, budgetPerManad: budget });
+    addCustomer({ name: n, timpris, budgetPerManad: budget, fastManadsintaktKr: fastIntakt });
     setName("");
   };
 
@@ -472,8 +474,21 @@ function CustomersSection({ customers, addCustomer, updateCustomer, removeCustom
           >
             <input type="number" min={0} value={budget} onChange={(e) => setBudget(Number(e.target.value))} style={inp} />
           </FormLabel>
+          <FormLabel
+            title="Fast månadsintäkt (valfritt)"
+            hint="Belopp som räknas in i teamets intäkt och marginal varje månad. Ingår inte i timpris eller budget; ingen koppling till planerade timmar."
+          >
+            <input
+              type="number"
+              min={0}
+              step={100}
+              value={fastIntakt}
+              onChange={(e) => setFastIntakt(Number(e.target.value))}
+              style={inp}
+            />
+          </FormLabel>
           <p style={{ fontSize: 11, color: "#888", lineHeight: 1.45, margin: 0 }}>
-            Nya kunder får automatiskt en färg som inte används på annan avdelning, kund eller internt projekt. Byt färg i listan nedan.
+            Nya kunder får automatiskt en färg som inte redan används (person, avdelning, kund, internt projekt eller drift). Byt färg i listan nedan.
           </p>
           {err && <div style={{ color: "#ef4444", fontSize: 13 }}>{err}</div>}
           <button type="button" onClick={submit} style={btnPrimary}>
@@ -489,7 +504,7 @@ function CustomersSection({ customers, addCustomer, updateCustomer, removeCustom
 }
 
 function CustomerRow({ customer, updateCustomer, removeCustomer }) {
-  const colorVal = normalizeHex(customer.color) || "#2563eb";
+  const colorVal = normalizeHex(customer.color) || RESURZ_UI_PALETTE[0];
 
   return (
     <div style={{ ...row }}>
@@ -531,6 +546,23 @@ function CustomerRow({ customer, updateCustomer, removeCustomer }) {
         onChange={(e) => updateCustomer(customer.id, { budgetPerManad: Number(e.target.value) })}
         style={{ ...inpSm, width: 120 }}
         title="Budget kr/månad"
+      />
+      <span
+        style={{ fontSize: 11, color: "#666", width: 72, flexShrink: 0 }}
+        title="Fast intäkt utan timmar — räknas i intäkt/marginal"
+      >
+        Fast int.
+      </span>
+      <input
+        type="number"
+        min={0}
+        step={100}
+        value={customer.fastManadsintaktKr ?? 0}
+        onChange={(e) =>
+          updateCustomer(customer.id, { fastManadsintaktKr: Number(e.target.value) })
+        }
+        style={{ ...inpSm, width: 96 }}
+        title="Kr/månad som intäkt utan planerade timmar"
       />
       <button type="button" onClick={() => removeCustomer(customer.id)} style={btnDanger}>
         Ta bort
@@ -591,7 +623,7 @@ function DriftSection({ categories, addDriftCategory, updateDriftCategory, remov
 }
 
 function DriftRow({ category, updateDriftCategory, removeDriftCategory }) {
-  const colorVal = normalizeHex(category.color) || "#64748b";
+  const colorVal = normalizeHex(category.color) || RESURZ_UI_PALETTE[0];
 
   return (
     <div style={row}>
@@ -649,7 +681,7 @@ function InternalSection({ projects, addInternalProject, updateInternalProject, 
             <input placeholder="t.ex. 80" value={mal} onChange={(e) => setMal(e.target.value)} style={inp} />
           </FormLabel>
           <p style={{ fontSize: 11, color: "#888", lineHeight: 1.45, margin: 0 }}>
-            Nya projekt får en unik ledig färg automatiskt; ändra den i listan med färgväljaren.
+            Nya projekt får en ledig färg som inte redan används på annan entitet; ändra den i listan med färgväljaren.
           </p>
           {err && <div style={{ color: "#ef4444", fontSize: 13 }}>{err}</div>}
           <button type="button" onClick={submit} style={btnPrimary}>
@@ -665,7 +697,7 @@ function InternalSection({ projects, addInternalProject, updateInternalProject, 
 }
 
 function InternalRow({ project, updateInternalProject, removeInternalProject }) {
-  const colorVal = normalizeHex(project.color) || "#7c3aed";
+  const colorVal = normalizeHex(project.color) || RESURZ_UI_PALETTE[0];
 
   return (
     <div style={row}>
@@ -722,8 +754,9 @@ function SettingsSection({ workspace, updateSettings, fontMono }) {
   const { settings } = workspace;
   const driftCats = workspace.driftCategories || [];
   const cap = settings.standardKapacitetPerManad ?? 160;
-  const grad = cap > 0 ? (settings.standardMalFakturerbaraTimmar ?? 0) / cap : 0;
-  const annat = settings.standardTimmarInternAnnat ?? 0;
+  const annat = Math.max(0, Number(settings.standardTimmarInternAnnat) || 0);
+  const belaggGrad =
+    cap > 0 ? Math.max(0, Math.min(1, 1 - annat / cap)) : 0;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 22, maxWidth: 460 }}>
@@ -799,12 +832,6 @@ function SettingsSection({ workspace, updateSettings, fontMono }) {
         onChange={(v) => updateSettings({ standardKapacitetPerManad: Math.max(0, v) })}
       />
       <SettingsField
-        label="Standard mål fakturerbara timmar"
-        hint="Mål för debiterbar tid per månad för nya personer; används i beräkningar och som riktmärke."
-        value={settings.standardMalFakturerbaraTimmar}
-        onChange={(v) => updateSettings({ standardMalFakturerbaraTimmar: Math.max(0, v) })}
-      />
-      <SettingsField
         label="Globala timmar (vald driftpost)"
         hint="Samma heltal sätts för alla personer och månader på driftposten du valt ovan. 0 rensar. Ändring här skriver över manuella värden på just den raden."
         value={annat}
@@ -819,9 +846,13 @@ function SettingsSection({ workspace, updateSettings, fontMono }) {
           border: "1px solid #ffffff08",
         }}
       >
-        <div style={{ fontSize: 11, color: "#888" }}>Härledd standard faktureringsgrad</div>
-        <div style={{ fontSize: 20, fontWeight: 800, fontFamily: fontMono, marginTop: 4 }}>
-          {Math.round(grad * 100)}%
+        <div style={{ fontSize: 11, color: "#888" }}>Beläggningsgrad</div>
+        <div style={{ fontSize: 10, color: "#64748b", marginTop: 4, lineHeight: 1.45 }}>
+          Andel av standardkapacitet som återstår när globala drift-timmar är borträknade (100% minus
+          andelen globala timmar).
+        </div>
+        <div style={{ fontSize: 20, fontWeight: 800, fontFamily: fontMono, marginTop: 8 }}>
+          {Math.round(belaggGrad * 100)}%
         </div>
       </div>
     </div>
