@@ -1,6 +1,7 @@
 import { useState, useRef, useCallback, useEffect, Fragment } from "react";
 import { wholeHours, formatHours } from "../domain/hours.js";
 import { applyEdgeDelta, clampHoursToFeasible } from "../domain/allocationTrackMath.js";
+import { parseAllocKey } from "../domain/personRowAllocations.js";
 import { theme } from "../theme.js";
 
 const font = theme.fontMono;
@@ -29,6 +30,9 @@ export const PERSON_ROW_LEAVE_MIME = "application/x-resurz-person-row-leave";
 /** Personläge: omordning av entitetsblock på personrad. Värde: allocKey. */
 export const PERSON_ROW_BLOCK_REORDER_MIME = "application/x-resurz-person-row-reorder";
 
+/** Flytta allokeringsblock mellan personer eller kolumner. JSON { personId, categoryType, refId, hours }. */
+export const BLOCK_TRANSFER_MIME = "application/x-resurz-block-transfer";
+
 /**
  * @param {{
  *   feasibleMax: number,
@@ -47,6 +51,8 @@ export const PERSON_ROW_BLOCK_REORDER_MIME = "application/x-resurz-person-row-re
  *   onPoolDrop?: (payload: string) => void,
  *   allocRefDropMime?: string,
  *   onAllocRefDrop?: (spec: { categoryType: string, refId: string }) => void,
+ *   blockTransferContext?: { kind: "person"; personId: string } | { kind: "customer"; categoryType: string; refId: string },
+ *   onBlockTransfer?: (source: { personId: string, categoryType: string, refId: string, hours: number }, target: { personId: string, categoryType: string, refId: string }) => void,
  *   onAfterCommit?: () => void,
  * }} props
  */
@@ -67,6 +73,8 @@ export function AllocationHoursTrack({
   onPoolDrop,
   allocRefDropMime,
   onAllocRefDrop,
+  blockTransferContext,
+  onBlockTransfer,
   onAfterCommit,
 }) {
   const trackRef = useRef(null);
@@ -93,6 +101,58 @@ export function AllocationHoursTrack({
       onAfterCommit?.();
     },
     [pushHours, onAfterCommit]
+  );
+
+  const buildTransferSource = useCallback(
+    (key) => {
+      if (!blockTransferContext) return null;
+      const hv = wholeHours(getCellHours(key));
+      if (hv <= 0) return null;
+      if (blockTransferContext.kind === "person") {
+        const p = parseAllocKey(key);
+        if (!p) return null;
+        return {
+          personId: blockTransferContext.personId,
+          categoryType: p.categoryType,
+          refId: p.refId,
+          hours: hv,
+        };
+      }
+      return {
+        personId: key,
+        categoryType: blockTransferContext.categoryType,
+        refId: blockTransferContext.refId,
+        hours: hv,
+      };
+    },
+    [blockTransferContext, getCellHours]
+  );
+
+  const sameCell = (a, b) =>
+    a.personId === b.personId && a.categoryType === b.categoryType && a.refId === b.refId;
+
+  const tryConsumeBlockTransfer = useCallback(
+    (e, makeTarget) => {
+      if (!onBlockTransfer || !blockTransferContext) return false;
+      const raw = e.dataTransfer.getData(BLOCK_TRANSFER_MIME);
+      if (!raw) return false;
+      let source;
+      try {
+        source = JSON.parse(raw);
+      } catch {
+        return false;
+      }
+      if (!source?.personId || !source.categoryType || source.refId == null || !(Number(source.hours) > 0)) {
+        return false;
+      }
+      const target = makeTarget(source);
+      if (sameCell(source, target)) return false;
+      onBlockTransfer(source, target);
+      e.preventDefault();
+      e.stopPropagation();
+      return true;
+    },
+    [onBlockTransfer, blockTransferContext]
   );
 
   const onEdgePointerDown = (edgeIdx, e) => {
@@ -143,6 +203,22 @@ export function AllocationHoursTrack({
   };
 
   const onDropTrack = (e) => {
+    const consumed = tryConsumeBlockTransfer(e, (source) => {
+      if (blockTransferContext.kind === "person") {
+        return {
+          personId: blockTransferContext.personId,
+          categoryType: source.categoryType,
+          refId: source.refId,
+        };
+      }
+      return {
+        personId: source.personId,
+        categoryType: blockTransferContext.categoryType,
+        refId: blockTransferContext.refId,
+      };
+    });
+    if (consumed) return;
+
     if (poolDropMime && onPoolDrop) {
       const fromSidebar = e.dataTransfer.getData(poolDropMime);
       if (fromSidebar) {
@@ -185,7 +261,11 @@ export function AllocationHoursTrack({
     if (leaveMime && getLeavePayload) {
       e.dataTransfer.setData(leaveMime, getLeavePayload(key));
     }
-    e.dataTransfer.effectAllowed = "move";
+    const src = buildTransferSource(key);
+    if (src && onBlockTransfer) {
+      e.dataTransfer.setData(BLOCK_TRANSFER_MIME, JSON.stringify(src));
+    }
+    e.dataTransfer.effectAllowed = onBlockTransfer && src ? "copyMove" : "move";
   };
 
   const reorderOnto = (targetKey, draggedId, placeBefore) => {
@@ -205,6 +285,7 @@ export function AllocationHoursTrack({
     const t = Array.from(types);
     if (poolDropMime && onPoolDrop && t.includes(poolDropMime)) return "copy";
     if (allocRefDropMime && onAllocRefDrop && t.includes(allocRefDropMime)) return "copy";
+    if (onBlockTransfer && t.includes(BLOCK_TRANSFER_MIME)) return "move";
     if (t.includes(reorderMime)) return "move";
     return null;
   };
@@ -286,13 +367,31 @@ export function AllocationHoursTrack({
                   <div
                     draggable
                     onDragStart={(e) => onBlockReorderDragStart(key, e)}
-                    title="Dra för att byta ordning"
+                    title="Dra: byt ordning i raden — släpp på annan kund/person/projektkolumn för att flytta timmar"
                     onDragOver={(e) => {
-                      if (!Array.from(e.dataTransfer.types).includes(reorderMime)) return;
+                      const t = Array.from(e.dataTransfer.types);
+                      if (!t.includes(reorderMime) && !(onBlockTransfer && t.includes(BLOCK_TRANSFER_MIME))) return;
                       e.preventDefault();
                       e.dataTransfer.dropEffect = "move";
                     }}
                     onDrop={(e) => {
+                      const hit = tryConsumeBlockTransfer(e, (source) => {
+                        if (blockTransferContext.kind === "person") {
+                          const p = parseAllocKey(key);
+                          if (!p) return source;
+                          return {
+                            personId: blockTransferContext.personId,
+                            categoryType: p.categoryType,
+                            refId: p.refId,
+                          };
+                        }
+                        return {
+                          personId: key,
+                          categoryType: blockTransferContext.categoryType,
+                          refId: blockTransferContext.refId,
+                        };
+                      });
+                      if (hit) return;
                       const from = e.dataTransfer.getData(reorderMime);
                       if (!from) return;
                       e.preventDefault();

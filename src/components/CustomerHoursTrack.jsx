@@ -38,6 +38,7 @@ function personName(activePeople, personId) {
  *   upsertHours: (personId: string, categoryType: string, refId: string, hours: number) => void,
  *   activePeople: { id: string, name: string }[],
  *   onDropPerson: (personId: string) => void,
+ *   onBlockTransfer?: (source: { personId: string, categoryType: string, refId: string, hours: number }, target: { personId: string, categoryType: string, refId: string }) => void,
  * }} props
  */
 export function CustomerHoursTrack({
@@ -54,6 +55,7 @@ export function CustomerHoursTrack({
   upsertHours,
   activePeople,
   onDropPerson,
+  onBlockTransfer,
 }) {
   const pushHours = (next) => {
     orderedPersonIds.forEach((pid, i) => {
@@ -82,6 +84,8 @@ export function CustomerHoursTrack({
       onPoolDrop={(pid) => {
         if (pid && activePeople.some((p) => p.id === pid)) onDropPerson(pid);
       }}
+      blockTransferContext={onBlockTransfer ? { kind: "customer", categoryType, refId } : undefined}
+      onBlockTransfer={onBlockTransfer}
     />
   );
 }

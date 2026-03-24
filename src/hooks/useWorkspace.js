@@ -18,7 +18,10 @@ import { fetchRemoteWorkspaceRow, upsertRemoteWorkspace } from "../storage/supab
 import { isSupabaseConfigured } from "../storage/supabaseConfig.js";
 import { carryForwardFromPreviousMonth } from "../domain/monthCarryOver.js";
 import { customerCellBudgetLimit } from "../domain/calculations.js";
-import { redistributeCustomerColumnHours } from "../domain/customerColumnRedistribute.js";
+import {
+  redistributeAllocColumnHours,
+  maxHoursPersonOnCategoryCell,
+} from "../domain/customerColumnRedistribute.js";
 import {
   ensureInternAnnatForPerson,
   reapplyInternAnnatForPersonMonth,
@@ -243,8 +246,12 @@ export function useWorkspace() {
 
   const setSelectedMonthId = useCallback((monthId) => {
     persist((prev) => {
+      const monthExisted = prev.months.some((m) => m.id === monthId);
       let next = ensureMonth(prev, monthId);
-      next = carryForwardFromPreviousMonth(next, monthId);
+      /** Endast när månaden är ny i listan: kopiera från föregående månad. Annars återskapas t.ex. tömda rader vid varje månadsbyte. */
+      if (!monthExisted) {
+        next = carryForwardFromPreviousMonth(next, monthId);
+      }
       return next;
     });
     setSelectedMonthIdState(monthId);
@@ -305,26 +312,24 @@ export function useWorkspace() {
     [persist, selectedMonthId]
   );
 
-  const setCustomerColumnTotal = useCallback(
-    (customerId, targetTotal, contributorPersonIds) => {
+  const setAllocColumnTotal = useCallback(
+    (categoryType, refId, targetTotal, contributorPersonIds) => {
+      if (categoryType !== "internalProject" && categoryType !== "internalDrift") return;
       persist((prev) => {
         const monthId = selectedMonthId;
         const allowed = new Set((contributorPersonIds || []).filter(Boolean));
         let allocations = prev.allocations.filter((a) => {
-          if (
-            a.monthId === monthId &&
-            a.categoryType === "customer" &&
-            a.refId === customerId
-          ) {
+          if (a.monthId === monthId && a.categoryType === categoryType && a.refId === refId) {
             return allowed.has(a.personId);
           }
           return true;
         });
         const base = { ...prev, allocations };
-        const result = redistributeCustomerColumnHours(
+        const result = redistributeAllocColumnHours(
           base,
           monthId,
-          customerId,
+          categoryType,
+          refId,
           targetTotal,
           [...allowed]
         );
@@ -335,8 +340,8 @@ export function useWorkspace() {
             (a) =>
               a.monthId === monthId &&
               a.personId === personId &&
-              a.categoryType === "customer" &&
-              a.refId === customerId
+              a.categoryType === categoryType &&
+              a.refId === refId
           );
           if (h === 0) {
             if (idx >= 0) allocations = allocations.filter((_, i) => i !== idx);
@@ -351,8 +356,8 @@ export function useWorkspace() {
                 id: newId(),
                 monthId,
                 personId,
-                categoryType: "customer",
-                refId: customerId,
+                categoryType,
+                refId,
                 hours: h,
                 createdAt: nowIso(),
                 updatedAt: nowIso(),
@@ -378,6 +383,147 @@ export function useWorkspace() {
         next = reapplyInternAnnatForPersonMonth(next, personId, selectedMonthId);
         return next;
       });
+    },
+    [persist, selectedMonthId]
+  );
+
+  /** Tar bort alla allokeringar för vald månad och lägger tillbaka globala standardtimmar (intern annat) per aktiv person. */
+  const clearSelectedMonthAllocations = useCallback(() => {
+    persist((prev) => {
+      const monthId = selectedMonthId;
+      let next = {
+        ...prev,
+        allocations: prev.allocations.filter((a) => a.monthId !== monthId),
+      };
+      for (const p of (next.people || []).filter((x) => x.active !== false)) {
+        next = reapplyInternAnnatForPersonMonth(next, p.id, monthId);
+      }
+      return next;
+    });
+  }, [persist, selectedMonthId]);
+
+  /**
+   * Ersätter hela vald månads plan med en kopia av föregående kalendermånad (nya rad-id:n).
+   * Inkluderar alla allokeringar; globala standardtimmar följer kopian — töm först om du vill återställa från inställningar.
+   */
+  const replaceCurrentMonthFromPrevious = useCallback(() => {
+    persist((prev) => {
+      const targetMonthId = selectedMonthId;
+      const prevMonthId = addCalendarMonths(targetMonthId, -1);
+      let next = ensureMonth(ensureMonth(prev, prevMonthId), targetMonthId);
+      const ts = nowIso();
+      const prevRows = next.allocations.filter((a) => a.monthId === prevMonthId);
+      let allocations = next.allocations.filter((a) => a.monthId !== targetMonthId);
+      for (const a of prevRows) {
+        allocations.push({
+          ...a,
+          id: newId(),
+          monthId: targetMonthId,
+          hours: wholeHours(a.hours),
+          createdAt: ts,
+          updatedAt: ts,
+        });
+      }
+      return { ...next, allocations };
+    });
+  }, [persist, selectedMonthId]);
+
+  /**
+   * Flyttar timmar mellan celler i vald månad (en transaktion). Respekterar kundbudget och personens cell-tak.
+   * @param {{ personId: string, categoryType: string, refId: string }} from
+   * @param {{ personId: string, categoryType: string, refId: string }} to
+   */
+  const transferAllocationHours = useCallback(
+    (from, to) => {
+      persist((prev) => {
+        const monthId = selectedMonthId;
+        const ts = nowIso();
+        const rowMatch = (a, pid, ct, rid) =>
+          a.monthId === monthId && a.personId === pid && a.categoryType === ct && a.refId === rid;
+        const getH = (pid, ct, rid) => {
+          const a = prev.allocations.find((x) => rowMatch(x, pid, ct, rid));
+          return a ? wholeHours(a.hours) : 0;
+        };
+        const setRow = (allocations, pid, ct, rid, h) => {
+          const hW = wholeHours(h);
+          const idx = allocations.findIndex((x) => rowMatch(x, pid, ct, rid));
+          if (hW <= 0) {
+            return idx >= 0 ? allocations.filter((_, i) => i !== idx) : allocations;
+          }
+          if (idx >= 0) {
+            return allocations.map((x, i) =>
+              i === idx ? { ...x, hours: hW, updatedAt: ts } : x
+            );
+          }
+          return [
+            ...allocations,
+            {
+              id: newId(),
+              monthId,
+              personId: pid,
+              categoryType: ct,
+              refId: rid,
+              hours: hW,
+              createdAt: ts,
+              updatedAt: ts,
+            },
+          ];
+        };
+
+        const hMove = getH(from.personId, from.categoryType, from.refId);
+        if (hMove <= 0) return prev;
+        if (
+          from.personId === to.personId &&
+          from.categoryType === to.categoryType &&
+          from.refId === to.refId
+        ) {
+          return prev;
+        }
+
+        let merged = getH(to.personId, to.categoryType, to.refId) + hMove;
+        if (to.categoryType === "customer") {
+          const lim = customerCellBudgetLimit(prev, monthId, to.personId, to.refId);
+          if (lim.isCapped && Number.isFinite(lim.maxForThisPerson)) {
+            merged = Math.min(merged, lim.maxForThisPerson);
+          }
+        }
+        const room = maxHoursPersonOnCategoryCell(
+          prev,
+          monthId,
+          to.categoryType,
+          to.refId,
+          to.personId
+        );
+        merged = Math.min(merged, Math.max(0, wholeHours(room)));
+
+        const existingTo = getH(to.personId, to.categoryType, to.refId);
+        const actuallyMoved = Math.max(0, merged - existingTo);
+        const remainingSource = hMove - actuallyMoved;
+
+        let allocations = prev.allocations.slice();
+        allocations = setRow(allocations, from.personId, from.categoryType, from.refId, remainingSource);
+        allocations = setRow(allocations, to.personId, to.categoryType, to.refId, merged);
+        return { ...prev, allocations };
+      });
+    },
+    [persist, selectedMonthId]
+  );
+
+  /** Tar bort alla timmar i vald månad för en kund- eller internprojektkolumn (samma månad som månadsväljaren). */
+  const clearCategoryColumnAllocationsForMonth = useCallback(
+    (categoryType, refId) => {
+      if (categoryType !== "customer" && categoryType !== "internalProject") return;
+      persist((prev) => ({
+        ...prev,
+        allocations: prev.allocations.filter(
+          (a) =>
+            !(
+              a.monthId === selectedMonthId &&
+              a.categoryType === categoryType &&
+              a.refId === refId
+            )
+        ),
+      }));
     },
     [persist, selectedMonthId]
   );
@@ -437,6 +583,8 @@ export function useWorkspace() {
       const { name, kapacitetPerManad, malFakturerbaraTimmar, roles = [] } = payload;
       persist((prev) => {
         const pid = newId();
+        const fromPayload = payload.color ? normalizeHex(payload.color) : "";
+        const color = fromPayload || pickNextEntityColor(prev, "person");
         let next = {
           ...prev,
           people: [
@@ -450,6 +598,7 @@ export function useWorkspace() {
               comment: "",
               roles: [...roles],
               departmentId: payload.departmentId ?? null,
+              color,
             },
           ],
         };
@@ -472,6 +621,11 @@ export function useWorkspace() {
         }
         if (Object.prototype.hasOwnProperty.call(patch, "malFakturerbaraTimmar")) {
           p2.malFakturerbaraTimmar = Math.max(0, Number(patch.malFakturerbaraTimmar) || 0);
+        }
+        if (Object.prototype.hasOwnProperty.call(patch, "color")) {
+          const n = normalizeHex(patch.color);
+          if (n) p2.color = n;
+          else delete p2.color;
         }
         return {
           ...prev,
@@ -497,7 +651,7 @@ export function useWorkspace() {
     (payload) => {
       persist((prev) => {
         const fromPayload = payload.color ? normalizeHex(payload.color) : "";
-        const color = fromPayload || pickNextEntityColor(prev);
+        const color = fromPayload || pickNextEntityColor(prev, "customer");
         return {
           ...prev,
           customers: [
@@ -507,6 +661,7 @@ export function useWorkspace() {
               name: payload.name.trim(),
               timpris: Math.max(0, Number(payload.timpris) || 0),
               budgetPerManad: Math.max(0, Number(payload.budgetPerManad) || 0),
+              fastManadsintaktKr: Math.max(0, Math.round(Number(payload.fastManadsintaktKr) || 0)),
               active: true,
               comment: payload.comment ?? "",
               color,
@@ -544,6 +699,9 @@ export function useWorkspace() {
         }
         if (Object.prototype.hasOwnProperty.call(patch, "budgetPerManad")) {
           p2.budgetPerManad = Math.max(0, Number(patch.budgetPerManad) || 0);
+        }
+        if (Object.prototype.hasOwnProperty.call(patch, "fastManadsintaktKr")) {
+          p2.fastManadsintaktKr = Math.max(0, Math.round(Number(patch.fastManadsintaktKr) || 0));
         }
         return {
           ...prev,
@@ -587,7 +745,7 @@ export function useWorkspace() {
             active: true,
             comment: payload.comment ?? "",
             color:
-              (payload.color && normalizeHex(payload.color)) || pickNextEntityColor(prev),
+              (payload.color && normalizeHex(payload.color)) || pickNextEntityColor(prev, "internalProject"),
           },
         ],
       }));
@@ -641,7 +799,7 @@ export function useWorkspace() {
     persist((prev) => {
       const list = prev.departments || [];
       const fromPayload = payload.color ? normalizeHex(payload.color) : "";
-      const color = fromPayload || pickNextEntityColor(prev);
+      const color = fromPayload || pickNextEntityColor(prev, "department");
       return {
         ...prev,
         departments: [...list, { id: newId(), name: payload.name.trim(), color }],
@@ -679,7 +837,7 @@ export function useWorkspace() {
     (payload) => {
       persist((prev) => {
         const fromPayload = payload.color ? normalizeHex(payload.color) : "";
-        const color = fromPayload || pickNextEntityColor(prev);
+        const color = fromPayload || pickNextEntityColor(prev, "drift");
         return {
           ...prev,
           driftCategories: [
@@ -758,8 +916,12 @@ export function useWorkspace() {
     undo,
     redo,
     upsertHours,
-    setCustomerColumnTotal,
+    setAllocColumnTotal,
     clearPersonAllocationsForMonth,
+    clearSelectedMonthAllocations,
+    replaceCurrentMonthFromPrevious,
+    transferAllocationHours,
+    clearCategoryColumnAllocationsForMonth,
     getCellHours,
     updateSettings,
     addPerson,

@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect, useLayoutEffect } from "react";
+import { useState, useMemo, useEffect, useLayoutEffect, useCallback } from "react";
 import {
   allocationsForMonth,
   personHourBreakdown,
@@ -32,6 +32,7 @@ import {
   writePersonAllocOrder,
 } from "../domain/personRowAllocations.js";
 import { wholeHours, formatHours } from "../domain/hours.js";
+import { addCalendarMonths } from "../storage/workspace.js";
 import { theme } from "../theme.js";
 import { getPersonUiColorFromList } from "../domain/entityColors.js";
 import { usePlanningToast } from "../components/ToastStack.jsx";
@@ -308,6 +309,7 @@ function PersonRowCard({
   activeInternal,
   driftCategories,
   customersById,
+  onBlockTransfer,
 }) {
   const showToast = usePlanningToast();
   const list = contributorAllocKeysForPerson(monthAlloc, person.id);
@@ -506,6 +508,8 @@ function PersonRowCard({
           allocRefDropMime={ALLOC_REF_DRAG_MIME}
           onAllocRefDrop={addAllocFromDrop}
           onAfterCommit={checkBudgetAfterCommit}
+          blockTransferContext={onBlockTransfer ? { kind: "person", personId: person.id } : undefined}
+          onBlockTransfer={onBlockTransfer}
         />
       </div>
     </div>
@@ -521,6 +525,8 @@ export function PlanningView({
   getCellHours,
   clearPersonAllocationsForMonth,
   clearSelectedMonthAllocations,
+  replaceCurrentMonthFromPrevious,
+  transferAllocationHours,
   clearCategoryColumnAllocationsForMonth,
   /** Ref till yttre scroll (maxHeight-planeringsrutan); sätts av App för att spara scroll mellan flikar. */
   scrollContainerRef,
@@ -612,6 +618,25 @@ export function PlanningView({
     [workspace.allocations, selectedMonthId]
   );
 
+  const prevMonthId = useMemo(() => addCalendarMonths(selectedMonthId, -1), [selectedMonthId]);
+  const prevMonthHasPlannedHours = useMemo(
+    () =>
+      (workspace.allocations || []).some(
+        (a) => a.monthId === prevMonthId && wholeHours(a.hours) > 0
+      ),
+    [workspace.allocations, prevMonthId]
+  );
+
+  const onBlockTransfer = useCallback(
+    (source, target) => {
+      transferAllocationHours(
+        { personId: source.personId, categoryType: source.categoryType, refId: source.refId },
+        { personId: target.personId, categoryType: target.categoryType, refId: target.refId }
+      );
+    },
+    [transferAllocationHours]
+  );
+
   const planningScrollMaxH = "calc(100vh - 200px - 40px)";
 
   return (
@@ -629,12 +654,68 @@ export function PlanningView({
             display: "flex",
             alignItems: "center",
             justifyContent: "flex-end",
+            gap: 8,
             padding: "6px 10px",
             borderBottom: `1px solid ${theme.border}`,
             background: "rgba(14, 12, 24, 0.5)",
             flexShrink: 0,
           }}
         >
+          <button
+            type="button"
+            aria-label={`Kopiera plan från föregående månad till ${selectedMonthLabel}`}
+            title={
+              prevMonthHasPlannedHours
+                ? `Ersätt all plan i ${selectedMonthLabel} med kopia av föregående månad`
+                : "Inga timmar i föregående månad att kopiera"
+            }
+            disabled={!prevMonthHasPlannedHours}
+            onClick={() => {
+              if (!prevMonthHasPlannedHours) return;
+              if (
+                !window.confirm(
+                  `Ersätta hela planen för ${selectedMonthLabel} med en kopia av föregående månad?\n\nAll nuvarande timmar i denna månad (alla personer, kunder och poster) tas bort och ersätts. Detta kan inte ångras med en knapp — använd Ctrl+Z (Ångra) om du behöver.`
+                )
+              ) {
+                return;
+              }
+              replaceCurrentMonthFromPrevious();
+            }}
+            style={{
+              width: 28,
+              height: 28,
+              padding: 0,
+              border: "none",
+              borderRadius: 8,
+              background: prevMonthHasPlannedHours ? "rgba(255,255,255,0.05)" : "transparent",
+              color: prevMonthHasPlannedHours ? theme.textMuted : theme.textSoft,
+              cursor: prevMonthHasPlannedHours ? "pointer" : "not-allowed",
+              opacity: prevMonthHasPlannedHours ? 0.85 : 0.35,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+            }}
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden>
+              <rect
+                x="9"
+                y="3"
+                width="12"
+                height="12"
+                rx="2"
+                stroke="currentColor"
+                strokeWidth="1.5"
+                opacity="0.9"
+              />
+              <path
+                d="M5 9h10a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V9Z"
+                stroke="currentColor"
+                strokeWidth="1.5"
+                strokeLinejoin="round"
+                opacity="0.55"
+              />
+            </svg>
+          </button>
           <button
             type="button"
             aria-label={`Töm hela månaden ${selectedMonthLabel}`}
@@ -962,6 +1043,7 @@ export function PlanningView({
                     upsertHours={upsertHours}
                     clearCategoryColumnAllocationsForMonth={clearCategoryColumnAllocationsForMonth}
                     activePeople={activePeople}
+                    onBlockTransfer={onBlockTransfer}
                   />
                 ))
               )}
@@ -981,6 +1063,7 @@ export function PlanningView({
                       upsertHours={upsertHours}
                       clearCategoryColumnAllocationsForMonth={clearCategoryColumnAllocationsForMonth}
                       activePeople={activePeople}
+                      onBlockTransfer={onBlockTransfer}
                     />
                   ))}
                 </>
@@ -995,10 +1078,12 @@ export function PlanningView({
                       item={d}
                       workspace={workspace}
                       selectedMonthId={selectedMonthId}
+                      selectedMonthLabel={selectedMonthLabel}
                       contributorIds={contributorsByDrift[d.id] || []}
                       getCellHours={getCellHours}
                       upsertHours={upsertHours}
                       activePeople={activePeople}
+                      onBlockTransfer={onBlockTransfer}
                     />
                   ))}
                 </>
@@ -1025,6 +1110,7 @@ export function PlanningView({
                 activeInternal={activeInternal}
                 driftCategories={driftCategories}
                 customersById={customersById}
+                onBlockTransfer={onBlockTransfer}
               />
             ))
           )}
@@ -1045,6 +1131,7 @@ function CustomerColumnCard({
   upsertHours,
   clearCategoryColumnAllocationsForMonth,
   activePeople,
+  onBlockTransfer,
 }) {
   const showToast = usePlanningToast();
   const [dragOver, setDragOver] = useState(false);
@@ -1196,6 +1283,7 @@ function CustomerColumnCard({
           upsertHours={upsertHours}
           activePeople={activePeople}
           onDropPerson={addPersonFromDrop}
+          onBlockTransfer={onBlockTransfer}
         />
       </div>
     </div>
@@ -1214,6 +1302,7 @@ function AllocColumnCard({
   upsertHours,
   clearCategoryColumnAllocationsForMonth,
   activePeople,
+  onBlockTransfer,
 }) {
   const showToast = usePlanningToast();
   const [dragOver, setDragOver] = useState(false);
@@ -1367,6 +1456,7 @@ function AllocColumnCard({
           upsertHours={upsertHours}
           activePeople={activePeople}
           onDropPerson={addPersonFromDrop}
+          onBlockTransfer={onBlockTransfer}
         />
       </div>
     </div>
