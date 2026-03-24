@@ -1,23 +1,40 @@
-import { useState, useMemo, useRef, useEffect } from "react";
+import { useState, useMemo, useEffect, useLayoutEffect } from "react";
 import {
-  teamMetrics,
-  customerColumnMetrics,
-  internalProjectColumnMetrics,
-  driftColumnMetrics,
   allocationsForMonth,
   personHourBreakdown,
   personDerived,
   customerCellBudgetLimit,
   customerBudgetTimmar,
 } from "../domain/calculations.js";
-import { feasibleCustomerColumnMaxTotal } from "../domain/customerColumnRedistribute.js";
+import {
+  feasibleCustomerColumnMaxTotal,
+  feasibleAllocColumnMaxTotal,
+  maxHoursPersonOnCategoryCell,
+} from "../domain/customerColumnRedistribute.js";
+import {
+  CustomerHoursTrack,
+  CUSTOMER_TRACK_DRAG_MIME,
+  COLUMN_LEAVE_MIME,
+  CUSTOMER_BLOCK_REORDER_MIME,
+} from "../components/CustomerHoursTrack.jsx";
+import {
+  AllocationHoursTrack,
+  ALLOC_REF_DRAG_MIME,
+  PERSON_ROW_LEAVE_MIME,
+  PERSON_ROW_BLOCK_REORDER_MIME,
+} from "../components/AllocationHoursTrack.jsx";
+import {
+  allocKey,
+  parseAllocKey,
+  contributorAllocKeysForPerson,
+  mergePersonContributorOrder,
+  readPersonAllocOrder,
+  writePersonAllocOrder,
+} from "../domain/personRowAllocations.js";
 import { wholeHours, formatHours } from "../domain/hours.js";
 import { theme } from "../theme.js";
-import { MonthNavigator } from "../components/MonthNavigator.jsx";
-
-const LS_PLAN_INTERNAL = "resurz-plan-internal-open";
-const LS_PLAN_DRIFT = "resurz-plan-drift-open";
-const LS_PLAN_VIEW = "resurz-plan-view-mode";
+import { getPersonUiColorFromList } from "../domain/entityColors.js";
+import { usePlanningToast } from "../components/ToastStack.jsx";
 
 const font = theme.fontMono;
 const bodyFont = theme.fontSans;
@@ -26,33 +43,38 @@ const COL_CUSTOMER = theme.billable;
 const COL_INTERNAL = theme.internal;
 const COL_DRIFT = theme.drift;
 
-const cellInput = {
-  width: 50,
-  padding: "4px 2px",
-  textAlign: "center",
-  background: theme.bgDeep,
-  border: `1px solid ${theme.border}`,
-  borderRadius: 6,
-  color: theme.text,
-  fontSize: 11,
-  fontFamily: font,
-};
-
-/** timmar/ms — snabbt drag → tiotal, mellan → femtal, sakta → heltal. */
-const SNAP_SPEED_10 = 0.22;
-const SNAP_SPEED_5 = 0.035;
-
-function snapHoursFromDrag(raw, maxVal, speed) {
-  const r = wholeHours(raw);
-  let step = 1;
-  if (speed >= SNAP_SPEED_10) step = 10;
-  else if (speed >= SNAP_SPEED_5) step = 5;
-  const snapped = Math.round(r / step) * step;
-  return Math.max(0, Math.min(maxVal, wholeHours(snapped)));
-}
-
-function pct(x) {
-  return `${Math.round(x * 100)}%`;
+/** Diskret rensning (×) — ersätter textknapp ”Nollställ”. */
+function TinyClearIconButton({ disabled, title: tip, onClick }) {
+  return (
+    <button
+      type="button"
+      aria-label={tip}
+      title={tip}
+      disabled={disabled}
+      onClick={onClick}
+      style={{
+        marginLeft: "auto",
+        width: 22,
+        height: 22,
+        padding: 0,
+        borderRadius: 5,
+        border: `1px solid ${disabled ? "transparent" : theme.border}`,
+        background: disabled ? "transparent" : "rgba(255,255,255,0.04)",
+        color: disabled ? theme.textSoft : theme.textMuted,
+        cursor: disabled ? "not-allowed" : "pointer",
+        fontSize: 16,
+        lineHeight: 1,
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        flexShrink: 0,
+        fontFamily: bodyFont,
+        opacity: disabled ? 0.45 : 0.85,
+      }}
+    >
+      ×
+    </button>
+  );
 }
 
 function allocColor(w) {
@@ -130,261 +152,390 @@ function HoursBar({ segments, capacity, height = 6 }) {
   );
 }
 
-function HourSliderRow({
-  label,
-  sublabel,
-  accent,
-  hours,
-  cap,
-  onChange,
-  customerMax,
-  budgetHintLine,
-  maxSlider: maxSliderOverride,
-  /** Kundvy: uppdatera bara UI under drag; skicka värdet till parent först vid pointerup (undviker kedjereaktioner). */
-  commitOnPointerUp = false,
+const DRAG_MIME = CUSTOMER_TRACK_DRAG_MIME;
+
+const LS_CUSTOMER_ORDER_PREFIX = "resurz-plan-customer-order-";
+
+function readCustomerOrder(customerId) {
+  try {
+    const raw = localStorage.getItem(LS_CUSTOMER_ORDER_PREFIX + customerId);
+    if (!raw) return null;
+    const arr = JSON.parse(raw);
+    return Array.isArray(arr) ? arr : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeCustomerOrder(customerId, ids) {
+  try {
+    localStorage.setItem(LS_CUSTOMER_ORDER_PREFIX + customerId, JSON.stringify(ids));
+  } catch {
+    /* ignore */
+  }
+}
+
+function mergeCustomerContributorOrder(prevOrder, contributorIds) {
+  const set = new Set(contributorIds);
+  const kept = (prevOrder || []).filter((id) => set.has(id));
+  const added = contributorIds.filter((id) => !kept.includes(id));
+  return [...kept, ...added];
+}
+
+const LS_ALLOC_ORDER_PREFIX = "resurz-plan-alloc-order-";
+
+function readAllocColumnOrder(categoryType, refId) {
+  try {
+    const raw = localStorage.getItem(`${LS_ALLOC_ORDER_PREFIX}${categoryType}-${refId}`);
+    if (!raw) return null;
+    const arr = JSON.parse(raw);
+    return Array.isArray(arr) ? arr : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeAllocColumnOrder(categoryType, refId, ids) {
+  try {
+    localStorage.setItem(`${LS_ALLOC_ORDER_PREFIX}${categoryType}-${refId}`, JSON.stringify(ids));
+  } catch {
+    /* ignore */
+  }
+}
+
+/** @returns {{ categoryType: string, refId: string } | null} */
+function parseColumnLeavePayload(raw) {
+  if (!raw || typeof raw !== "string") return null;
+  const t = raw.trim();
+  if (!t) return null;
+  try {
+    const o = JSON.parse(t);
+    if (o && typeof o.categoryType === "string" && o.refId != null && String(o.refId) !== "") {
+      return { categoryType: o.categoryType, refId: String(o.refId) };
+    }
+    return null;
+  } catch {
+    return { categoryType: "customer", refId: t };
+  }
+}
+
+/** @returns {{ personId: string, allocKey: string } | null} */
+function parsePersonRowLeavePayload(raw) {
+  if (!raw || typeof raw !== "string") return null;
+  const t = raw.trim();
+  if (!t) return null;
+  try {
+    const o = JSON.parse(t);
+    if (o && typeof o.personId === "string" && typeof o.allocKey === "string" && o.personId && o.allocKey) {
+      return { personId: o.personId, allocKey: o.allocKey };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function entityLabelForAllocKey(key, activeCustomers, activeInternal, driftCategories) {
+  const p = parseAllocKey(key);
+  if (!p) return key;
+  if (p.categoryType === "customer") return activeCustomers.find((c) => c.id === p.refId)?.name ?? p.refId;
+  if (p.categoryType === "internalProject") return activeInternal.find((x) => x.id === p.refId)?.name ?? p.refId;
+  if (p.categoryType === "internalDrift") return driftCategories.find((x) => x.id === p.refId)?.name ?? p.refId;
+  return p.refId;
+}
+
+function entityColorForAllocKey(key, activeCustomers, activeInternal, driftCategories) {
+  const p = parseAllocKey(key);
+  if (!p) return COL_CUSTOMER;
+  if (p.categoryType === "customer") return activeCustomers.find((c) => c.id === p.refId)?.color || COL_CUSTOMER;
+  if (p.categoryType === "internalProject") return activeInternal.find((x) => x.id === p.refId)?.color || COL_INTERNAL;
+  if (p.categoryType === "internalDrift") return driftCategories.find((x) => x.id === p.refId)?.color || COL_DRIFT;
+  return COL_CUSTOMER;
+}
+
+function PoolAllocRow({ name, color, categoryType, refId }) {
+  return (
+    <div
+      draggable
+      onDragStart={(e) => {
+        e.dataTransfer.setData(ALLOC_REF_DRAG_MIME, JSON.stringify({ categoryType, refId }));
+        e.dataTransfer.effectAllowed = "copy";
+      }}
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 8,
+        padding: "8px 12px",
+        cursor: "grab",
+        borderBottom: `1px solid ${theme.border}`,
+        color: "inherit",
+      }}
+    >
+      <span
+        aria-hidden
+        style={{
+          width: 4,
+          height: 18,
+          borderRadius: 2,
+          flexShrink: 0,
+          background: color,
+          boxShadow: "inset 0 0 0 1px rgba(0,0,0,0.25)",
+        }}
+      />
+      <span
+        style={{
+          fontSize: 13,
+          fontWeight: 600,
+          letterSpacing: "-0.02em",
+          color: theme.textMuted,
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+          whiteSpace: "nowrap",
+        }}
+      >
+        {name}
+      </span>
+    </div>
+  );
+}
+
+function PersonRowCard({
+  person,
+  workspace,
+  selectedMonthId,
+  selectedMonthLabel,
+  monthAlloc,
+  getCellHours,
+  upsertHours,
+  clearPersonAllocationsForMonth,
+  activePeople,
+  activeCustomers,
+  activeInternal,
+  driftCategories,
+  customersById,
 }) {
-  const v = wholeHours(hours);
-  const hasCustCap = customerMax !== undefined && Number.isFinite(customerMax);
-  const maxSlider =
-    maxSliderOverride !== undefined && Number.isFinite(maxSliderOverride)
-      ? Math.max(wholeHours(maxSliderOverride), v, 1)
-      : hasCustCap
-        ? Math.max(v, customerMax, customerMax === 0 && v === 0 ? 0 : 1)
-        : Math.max(cap, v, 1);
-  const dragRef = useRef({ t: 0, raw: v });
-  const ptrDownRef = useRef(false);
-  const [draft, setDraft] = useState(null);
+  const showToast = usePlanningToast();
+  const list = contributorAllocKeysForPerson(monthAlloc, person.id);
+  const contribKey = [...list].sort().join("\0");
+
+  const [orderedKeys, setOrderedKeys] = useState(() =>
+    mergePersonContributorOrder(readPersonAllocOrder(person.id), contributorAllocKeysForPerson(monthAlloc, person.id))
+  );
 
   useEffect(() => {
-    if (!ptrDownRef.current) setDraft(null);
-  }, [hours]);
+    setOrderedKeys((prev) => mergePersonContributorOrder(prev, list));
+  }, [contribKey, person.id]);
 
-  const shownVal = Math.min(v, maxSlider);
-  const draftShown = draft != null ? Math.min(wholeHours(draft), maxSlider) : null;
-  const rangeVal = draftShown != null ? draftShown : shownVal;
-  const displayV = rangeVal;
-  const fillPct = maxSlider > 0 ? (rangeVal / maxSlider) * 100 : 0;
-  const atCustomerCap =
-    hasCustCap && customerMax >= 0 && displayV >= customerMax && displayV > 0;
+  const effectiveOrder = useMemo(
+    () => mergePersonContributorOrder(orderedKeys, list),
+    [orderedKeys, contribKey, person.id]
+  );
 
-  const handleRangeChange = (e) => {
-    const raw = wholeHours(e.target.value);
-    if (commitOnPointerUp && ptrDownRef.current) {
-      dragRef.current = { t: Date.now(), raw };
-      setDraft(raw);
-      return;
+  const [budgetWarn, setBudgetWarn] = useState(null);
+  const flashBudgetWarn = (msg) => {
+    setBudgetWarn(msg);
+    window.setTimeout(() => setBudgetWarn(null), 7000);
+  };
+
+  const cap = wholeHours(person.kapacitetPerManad || 0);
+  const feasibleMax = cap;
+
+  const total = useMemo(() => {
+    let s = 0;
+    for (const a of monthAlloc) {
+      if (a.personId === person.id) s += wholeHours(a.hours);
     }
-    const now = Date.now();
-    const prev = dragRef.current;
-    const dt = Math.max(now - prev.t, 1);
-    const dRaw = Math.abs(raw - prev.raw);
-    const speed = dRaw / dt;
-    dragRef.current = { t: now, raw };
-    const c = snapHoursFromDrag(raw, maxSlider, speed);
-    if (commitOnPointerUp) {
-      if (c !== v) onChange(c);
-    } else {
-      onChange(c);
+    return s;
+  }, [monthAlloc, person.id]);
+
+  const persistOrder = (keys) => writePersonAllocOrder(person.id, keys);
+
+  const pushHours = (next) => {
+    effectiveOrder.forEach((key, i) => {
+      const p = parseAllocKey(key);
+      if (p) upsertHours(person.id, p.categoryType, p.refId, next[i] ?? 0);
+    });
+  };
+
+  const checkBudgetAfterCommit = () => {
+    for (const key of effectiveOrder) {
+      const p = parseAllocKey(key);
+      if (!p || p.categoryType !== "customer") continue;
+      const h = wholeHours(getCellHours(person.id, "customer", p.refId));
+      const lim = customerCellBudgetLimit(workspace, selectedMonthId, person.id, p.refId);
+      if (lim.isCapped && Number.isFinite(lim.maxForThisPerson) && h > lim.maxForThisPerson) {
+        const c = customersById[p.refId];
+        const name = c?.name ?? p.refId;
+        flashBudgetWarn(
+          `${name}: Kunden har ${formatHours(lim.budgetTimmar)} h i budgeterade timmar. Övriga personer har ${formatHours(lim.usedByOthers)} h — du kan lägga högst ${formatHours(lim.maxForThisPerson)} h här.`
+        );
+        break;
+      }
     }
   };
 
+  const addAllocFromDrop = (spec) => {
+    const k = allocKey(spec.categoryType, spec.refId);
+    const ok =
+      (spec.categoryType === "customer" && activeCustomers.some((c) => c.id === spec.refId)) ||
+      (spec.categoryType === "internalProject" && activeInternal.some((p) => p.id === spec.refId)) ||
+      (spec.categoryType === "internalDrift" && driftCategories.some((d) => d.id === spec.refId));
+    if (!ok) return;
+    const baseOrder = mergePersonContributorOrder(orderedKeys, list);
+    if (baseOrder.includes(k)) {
+      showToast("Finns redan på den här personen.");
+      return;
+    }
+    if (cap <= 0) {
+      showToast("Personen har ingen kapacitet den här månaden.");
+      return;
+    }
+    let otherTotal = 0;
+    for (const a of monthAlloc) {
+      if (a.personId !== person.id) continue;
+      if (a.categoryType === spec.categoryType && a.refId === spec.refId) continue;
+      otherTotal += wholeHours(a.hours);
+    }
+    const slack = Math.max(0, cap - otherTotal);
+    const maxP = maxHoursPersonOnCategoryCell(workspace, selectedMonthId, spec.categoryType, spec.refId, person.id);
+    const init = Math.min(8, maxP, slack);
+    if (init <= 0) {
+      if (slack <= 0) {
+        showToast("Personen har inga timmar kvar — redan fullt belagd.");
+      } else if (spec.categoryType === "customer") {
+        showToast("Kunden har inga timmar kvar som du kan lägga här (budget eller kapacitet).");
+      } else {
+        showToast("Posten har inga timmar kvar som du kan lägga här.");
+      }
+      return;
+    }
+    const nextOrder = [...baseOrder, k];
+    upsertHours(person.id, spec.categoryType, spec.refId, init);
+    setOrderedKeys(nextOrder);
+    writePersonAllocOrder(person.id, nextOrder);
+    window.setTimeout(checkBudgetAfterCommit, 0);
+  };
+
+  let aw = "balanced";
+  const allocRate = cap > 0 ? total / cap : 0;
+  if (allocRate < 0.9) aw = "under";
+  if (allocRate > 1) aw = "over";
+
+  const personStripe = getPersonUiColorFromList(activePeople, person.id);
+
   return (
     <div
-      className="plan-slider-wrap"
       style={{
-        ["--slider-accent"]: accent,
-        ["--slider-fill-pct"]: `${fillPct}%`,
-        display: "grid",
-        gridTemplateColumns: "minmax(100px, 1fr) 1fr auto",
-        gap: 8,
-        alignItems: "center",
-      padding: "7px 10px",
-        borderRadius: 11,
-        background: displayV > 0 ? theme.surface : theme.bgDeep,
-        border: `1px solid ${
-          atCustomerCap
-            ? "rgba(232, 186, 168, 0.55)"
-            : displayV > 0
-              ? `${accent}55`
-              : theme.border
-        }`,
-        marginBottom: 6,
-        boxShadow: atCustomerCap ? "inset 0 0 0 1px rgba(232, 186, 168, 0.28)" : "none",
+        marginBottom: 8,
+        display: "flex",
+        alignItems: "stretch",
+        gap: 10,
+        padding: "8px 12px",
+        borderRadius: 10,
+        border: `1px solid ${theme.border}`,
+        background: theme.surface,
       }}
     >
-      <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
-        <div
-          style={{
-            width: 5,
-            alignSelf: "stretch",
-            minHeight: 36,
-            borderRadius: 4,
-            background: accent,
-            opacity: displayV > 0 ? 1 : 0.42,
-            flexShrink: 0,
-            boxShadow: `inset 0 0 0 1px ${theme.border}`,
-          }}
-        />
-        <div style={{ minWidth: 0 }}>
+      <div
+        style={{
+          width: 4,
+          alignSelf: "stretch",
+          minHeight: 40,
+          borderRadius: 3,
+          background: personStripe,
+          flexShrink: 0,
+        }}
+      />
+      <div style={{ display: "flex", flexDirection: "column", minWidth: 0, flex: 1, gap: 6 }}>
+        {budgetWarn ? (
           <div
             style={{
-              fontSize: 12,
-              fontWeight: 600,
-              color: displayV > 0 ? theme.text : theme.textMuted,
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              whiteSpace: "nowrap",
+              padding: "8px 10px",
+              borderRadius: 8,
+              background: "rgba(232, 186, 168, 0.12)",
+              border: "1px solid rgba(232, 186, 168, 0.45)",
+              color: theme.accentSand,
+              fontSize: 11,
+              lineHeight: 1.35,
             }}
           >
-            {label}
+            {budgetWarn}
           </div>
-          {sublabel ? <div style={{ fontSize: 9, color: theme.textSoft, marginTop: 1 }}>{sublabel}</div> : null}
-          {budgetHintLine ? (
-            <div style={{ fontSize: 9, color: theme.textMuted, marginTop: 4, lineHeight: 1.35 }}>
-              {budgetHintLine}
-            </div>
-          ) : null}
-        </div>
-      </div>
-      <input
-        type="range"
-        className="plan-slider"
-        min={0}
-        max={maxSlider}
-        step={1}
-        value={rangeVal}
-        onPointerDown={(e) => {
-          dragRef.current = { t: Date.now(), raw: shownVal };
-          if (commitOnPointerUp) {
-            ptrDownRef.current = true;
-            setDraft(shownVal);
-            try {
-              e.currentTarget.setPointerCapture(e.pointerId);
-            } catch {
-              /* ignore */
-            }
-          }
-        }}
-        onPointerUp={(e) => {
-          if (!commitOnPointerUp || !ptrDownRef.current) return;
-          ptrDownRef.current = false;
-          try {
-            e.currentTarget.releasePointerCapture(e.pointerId);
-          } catch {
-            /* ignore */
-          }
-          const raw = wholeHours(e.currentTarget.value);
-          const now = Date.now();
-          const prev = dragRef.current;
-          const dt = Math.max(now - prev.t, 1);
-          const dRaw = Math.abs(raw - prev.raw);
-          const speed = dRaw / dt;
-          dragRef.current = { t: now, raw };
-          const c = snapHoursFromDrag(raw, maxSlider, speed);
-          setDraft(null);
-          if (c !== v) onChange(c);
-        }}
-        onPointerCancel={(e) => {
-          if (!commitOnPointerUp || !ptrDownRef.current) return;
-          ptrDownRef.current = false;
-          try {
-            e.currentTarget.releasePointerCapture(e.pointerId);
-          } catch {
-            /* ignore */
-          }
-          setDraft(null);
-        }}
-        onFocus={() => {
-          if (commitOnPointerUp && !ptrDownRef.current) {
-            dragRef.current = { t: Date.now(), raw: shownVal };
-          }
-        }}
-        onChange={handleRangeChange}
-      />
-      <input
-        type="number"
-        min={0}
-        step={1}
-        value={(draft != null ? draftShown : v) || ""}
-        placeholder="0"
-        onChange={(e) => {
-          ptrDownRef.current = false;
-          setDraft(null);
-          onChange(wholeHours(e.target.value));
-        }}
-        style={{ ...cellInput, width: 56, flexShrink: 0 }}
-      />
-    </div>
-  );
-}
-
-function CollapsiblePlanningSection({ title, accent, open, onToggle, summary, children }) {
-  return (
-    <div style={{ marginBottom: 2 }}>
-      <button
-        type="button"
-        onClick={onToggle}
-        aria-expanded={open}
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: 8,
-          width: "100%",
-          textAlign: "left",
-          background: open ? theme.surface2 : "rgba(36, 30, 58, 0.35)",
-          border: `1px solid ${open ? `${accent}40` : theme.border}`,
-          borderRadius: 10,
-          padding: "8px 11px",
-          cursor: "pointer",
-          marginTop: 14,
-          marginBottom: open ? 2 : 0,
-          transition: "background 0.15s, border-color 0.15s",
-        }}
-      >
-        <span
-          style={{
-            color: accent,
-            fontSize: 10,
-            width: 14,
-            fontWeight: 800,
-            flexShrink: 0,
-          }}
-          aria-hidden
-        >
-          {open ? "▼" : "▶"}
-        </span>
-        <span style={{ fontWeight: 700, color: accent, fontSize: 11, letterSpacing: 0.3 }}>{title}</span>
-        {summary ? (
-          <span style={{ marginLeft: "auto", fontSize: 11, color: theme.textMuted, fontFamily: font }}>
-            {summary}
-          </span>
         ) : null}
-      </button>
-      {open ? <div style={{ marginTop: 4 }}>{children}</div> : null}
+        <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+          <div style={{ fontSize: 15, fontWeight: 800, color: theme.text, letterSpacing: "-0.02em" }}>{person.name}</div>
+          <span style={{ fontSize: 11, fontWeight: 800, fontFamily: font, color: allocColor(aw) }}>
+            {formatHours(total)} / {cap} h
+          </span>
+          <TinyClearIconButton
+            disabled={total === 0}
+            title={
+              total === 0
+                ? "Inga planerade timmar denna månad"
+                : `Ta bort alla timmar för ${person.name} i ${selectedMonthLabel} (global drift enligt inställningar läggs tillbaka)`
+            }
+            onClick={() => {
+              if (total === 0) return;
+              if (
+                !window.confirm(
+                  `Nollställa alla planerade timmar för ${person.name} i ${selectedMonthLabel}? Globala standardtimmar på den driftpost du valt under Inställningar läggs tillbaka automatiskt.`
+                )
+              ) {
+                return;
+              }
+              clearPersonAllocationsForMonth(person.id);
+            }}
+          />
+        </div>
+        <AllocationHoursTrack
+          feasibleMax={feasibleMax}
+          orderedKeys={effectiveOrder}
+          setOrderedKeys={setOrderedKeys}
+          persistOrder={persistOrder}
+          getCellHours={(key) => {
+            const p = parseAllocKey(key);
+            return p ? getCellHours(person.id, p.categoryType, p.refId) : 0;
+          }}
+          pushHours={pushHours}
+          maxHoursForKey={(key) => {
+            const p = parseAllocKey(key);
+            return p ? maxHoursPersonOnCategoryCell(workspace, selectedMonthId, p.categoryType, p.refId, person.id) : 0;
+          }}
+          blockMeta={(key) => ({
+            label: entityLabelForAllocKey(key, activeCustomers, activeInternal, driftCategories),
+            color: entityColorForAllocKey(key, activeCustomers, activeInternal, driftCategories),
+          })}
+          reorderMime={PERSON_ROW_BLOCK_REORDER_MIME}
+          leaveMime={PERSON_ROW_LEAVE_MIME}
+          getLeavePayload={(draggedKey) => JSON.stringify({ personId: person.id, allocKey: draggedKey })}
+          allocRefDropMime={ALLOC_REF_DRAG_MIME}
+          onAllocRefDrop={addAllocFromDrop}
+          onAfterCommit={checkBudgetAfterCommit}
+        />
+      </div>
     </div>
   );
 }
-
-const DRAG_MIME = "application/x-resurz-person";
 
 export function PlanningView({
+  /** "customer" = kolumnvy (kunder m.m.); "person" = redigering per person */
+  mode,
   workspace,
   selectedMonthId,
-  setSelectedMonthId,
-  shiftMonth,
   upsertHours,
-  setCustomerColumnTotal,
   getCellHours,
   clearPersonAllocationsForMonth,
+  clearSelectedMonthAllocations,
+  clearCategoryColumnAllocationsForMonth,
+  /** Ref till yttre scroll (maxHeight-planeringsrutan); sätts av App för att spara scroll mellan flikar. */
+  scrollContainerRef,
+  /** Ref till { customer: number, person: number } med sparad scrollTop per läge. */
+  planningScrollTopsRef,
 }) {
   const activePeople = workspace.people.filter((p) => p.active !== false);
   const activeCustomers = workspace.customers.filter((c) => c.active !== false);
   const activeInternal = workspace.internalProjects.filter((p) => p.active !== false);
   const driftCategories = workspace.driftCategories || [];
-  const tm = teamMetrics(workspace, selectedMonthId);
-  const custCols = customerColumnMetrics(workspace, selectedMonthId);
-  const intCols = internalProjectColumnMetrics(workspace, selectedMonthId);
-  const driftCols = driftColumnMetrics(workspace, selectedMonthId);
   const sortedMonths = [...workspace.months].sort((a, b) => a.id.localeCompare(b.id));
   const selectedMonthLabel =
     sortedMonths.find((m) => m.id === selectedMonthId)?.label ?? selectedMonthId;
@@ -396,38 +547,13 @@ export function PlanningView({
 
   const monthAlloc = allocationsForMonth(workspace.allocations, selectedMonthId);
 
-  const [selectedId, setSelectedId] = useState(null);
-  const [internalSectionOpen, setInternalSectionOpen] = useState(() => {
-    try {
-      return localStorage.getItem(LS_PLAN_INTERNAL) === "1";
-    } catch {
-      return false;
-    }
-  });
-  const [driftSectionOpen, setDriftSectionOpen] = useState(() => {
-    try {
-      return localStorage.getItem(LS_PLAN_DRIFT) === "1";
-    } catch {
-      return false;
-    }
-  });
-
-  const [planMode, setPlanMode] = useState(() => {
-    try {
-      const v = localStorage.getItem(LS_PLAN_VIEW);
-      return v === "customer" ? "customer" : "person";
-    } catch {
-      return "person";
-    }
-  });
-
-  useEffect(() => {
-    try {
-      localStorage.setItem(LS_PLAN_VIEW, planMode);
-    } catch {
-      /* ignore */
-    }
-  }, [planMode]);
+  useLayoutEffect(() => {
+    if (!scrollContainerRef || !planningScrollTopsRef?.current) return;
+    const el = scrollContainerRef.current;
+    if (!el) return;
+    const key = mode === "customer" ? "customer" : "person";
+    el.scrollTop = planningScrollTopsRef.current[key] ?? 0;
+  }, [mode, scrollContainerRef, planningScrollTopsRef]);
 
   const contributorsByCustomer = useMemo(() => {
     const monthSlice = allocationsForMonth(workspace.allocations, selectedMonthId);
@@ -445,29 +571,37 @@ export function PlanningView({
     return out;
   }, [workspace.allocations, selectedMonthId, activeCustomers, activePeople]);
 
-  useEffect(() => {
-    try {
-      localStorage.setItem(LS_PLAN_INTERNAL, internalSectionOpen ? "1" : "0");
-    } catch {
-      /* ignore */
+  const contributorsByInternalProject = useMemo(() => {
+    const monthSlice = allocationsForMonth(workspace.allocations, selectedMonthId);
+    /** @type {Record<string, string[]>} */
+    const out = {};
+    for (const p of activeInternal) {
+      const ids = new Set();
+      for (const a of monthSlice) {
+        if (a.categoryType === "internalProject" && a.refId === p.id && wholeHours(a.hours) > 0) {
+          ids.add(a.personId);
+        }
+      }
+      out[p.id] = [...ids].filter((pid) => activePeople.some((x) => x.id === pid));
     }
-  }, [internalSectionOpen]);
+    return out;
+  }, [workspace.allocations, selectedMonthId, activeInternal, activePeople]);
 
-  useEffect(() => {
-    try {
-      localStorage.setItem(LS_PLAN_DRIFT, driftSectionOpen ? "1" : "0");
-    } catch {
-      /* ignore */
+  const contributorsByDrift = useMemo(() => {
+    const monthSlice = allocationsForMonth(workspace.allocations, selectedMonthId);
+    /** @type {Record<string, string[]>} */
+    const out = {};
+    for (const d of driftCategories) {
+      const ids = new Set();
+      for (const a of monthSlice) {
+        if (a.categoryType === "internalDrift" && a.refId === d.id && wholeHours(a.hours) > 0) {
+          ids.add(a.personId);
+        }
+      }
+      out[d.id] = [...ids].filter((pid) => activePeople.some((x) => x.id === pid));
     }
-  }, [driftSectionOpen]);
-
-  const resolvedPersonId = useMemo(() => {
-    if (!activePeople.length) return null;
-    if (selectedId && activePeople.some((p) => p.id === selectedId)) return selectedId;
-    return activePeople[0].id;
-  }, [activePeople, selectedId]);
-
-  const selectedPerson = activePeople.find((p) => p.id === resolvedPersonId);
+    return out;
+  }, [workspace.allocations, selectedMonthId, driftCategories, activePeople]);
 
   const sidebarRowStats = (person) => {
     const b = personHourBreakdown(monthAlloc, person.id, customersById);
@@ -475,105 +609,90 @@ export function PlanningView({
     return { ...b, ...d, cap: person.kapacitetPerManad };
   };
 
+  const monthHasPlannedHours = useMemo(
+    () =>
+      (workspace.allocations || []).some(
+        (a) => a.monthId === selectedMonthId && wholeHours(a.hours) > 0
+      ),
+    [workspace.allocations, selectedMonthId]
+  );
+
+  const planningScrollMaxH = "calc(100vh - 200px - 40px)";
+
   return (
     <div style={{ fontFamily: bodyFont, color: theme.text }}>
       <div
         style={{
-          display: "flex",
-          flexWrap: "wrap",
-          alignItems: "center",
-          gap: 14,
-          marginBottom: 16,
+          border: `1px solid ${theme.border}`,
+          borderRadius: 14,
+          background: theme.surface,
+          overflow: "hidden",
         }}
       >
-        <MonthNavigator
-          months={sortedMonths}
-          selectedMonthId={selectedMonthId}
-          onSelect={setSelectedMonthId}
-          onShift={shiftMonth}
-          compact
-        />
         <div
           style={{
             display: "flex",
-            background: theme.surface,
-            borderRadius: 10,
-            border: `1px solid ${theme.border}`,
-            padding: 3,
-            gap: 2,
+            alignItems: "center",
+            justifyContent: "flex-end",
+            padding: "6px 10px",
+            borderBottom: `1px solid ${theme.border}`,
+            background: "rgba(14, 12, 24, 0.5)",
+            flexShrink: 0,
           }}
-          role="group"
-          aria-label="Planeringsvy"
         >
           <button
             type="button"
-            onClick={() => setPlanMode("person")}
+            aria-label={`Töm hela månaden ${selectedMonthLabel}`}
+            title={
+              monthHasPlannedHours
+                ? `Ta bort alla timmar i ${selectedMonthLabel} för alla personer. Standardtimmar enligt inställningar läggs tillbaka på vald driftpost.`
+                : "Inga timmar att ta bort denna månad"
+            }
+            disabled={!monthHasPlannedHours}
+            onClick={() => {
+              if (!monthHasPlannedHours) return;
+              if (
+                !window.confirm(
+                  `Tömma hela ${selectedMonthLabel}? Alla planerade timmar (kunder, projekt, drift) tas bort för alla personer. Globala standardtimmar på vald driftpost sätts per person igen.`
+                )
+              ) {
+                return;
+              }
+              clearSelectedMonthAllocations();
+            }}
             style={{
-              padding: "8px 14px",
-              borderRadius: 8,
+              width: 28,
+              height: 28,
+              padding: 0,
               border: "none",
-              cursor: "pointer",
-              fontSize: 12,
-              fontWeight: 700,
-              fontFamily: bodyFont,
-              background: planMode === "person" ? theme.tabActive : "transparent",
-              color: planMode === "person" ? theme.text : theme.textMuted,
+              borderRadius: 8,
+              background: monthHasPlannedHours ? "rgba(255,255,255,0.05)" : "transparent",
+              color: monthHasPlannedHours ? theme.textMuted : theme.textSoft,
+              cursor: monthHasPlannedHours ? "pointer" : "not-allowed",
+              opacity: monthHasPlannedHours ? 0.8 : 0.35,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
             }}
           >
-            Personer
-          </button>
-          <button
-            type="button"
-            onClick={() => setPlanMode("customer")}
-            style={{
-              padding: "8px 14px",
-              borderRadius: 8,
-              border: "none",
-              cursor: "pointer",
-              fontSize: 12,
-              fontWeight: 700,
-              fontFamily: bodyFont,
-              background: planMode === "customer" ? theme.tabActive : "transparent",
-              color: planMode === "customer" ? theme.text : theme.textMuted,
-            }}
-          >
-            Kunder
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden>
+              <path
+                d="M9 3h6l1 2h5v2H3V5h5l1-2Zm0 5h2v11H9V8Zm4 0h2v11h-2V8Zm-7 0h2v11H6V8Zm11 0h2v11h-2V8Z"
+                fill="currentColor"
+                opacity="0.75"
+              />
+            </svg>
           </button>
         </div>
-        <div style={{ flex: 1, minWidth: 260 }}>
-          <div style={{ fontSize: 9, fontWeight: 700, color: theme.textSoft, marginBottom: 5 }}>SNABB KPI (TEAM)</div>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-            <Kpi label="Kapacitet" value={`${tm.teamkapacitet} h`} />
-            <Kpi label="Fakturerbart" value={`${formatHours(tm.teamFakturerbara)} h`} accent={theme.billable} />
-            <Kpi label="Internt proj." value={`${formatHours(tm.teamInternProj)} h`} accent={theme.internal} />
-            <Kpi label="Intern drift" value={`${formatHours(tm.teamInternDrift)} h`} accent={theme.drift} />
-            <Kpi label="Allokerat" value={`${formatHours(tm.teamTot)} h`} />
-            <Kpi
-              label="Kvar"
-              value={`${formatHours(tm.teamKvar)} h`}
-              accent={tm.teamKvar < 0 ? theme.danger : theme.ok}
-            />
-            <Kpi label="Allok. %" value={pct(tm.teamAllocGrad)} />
-            <Kpi label="Fakt. %" value={pct(tm.teamBillGrad)} />
-            <Kpi
-              label="Intäkt"
-              value={`${Math.round(tm.teamIntakt).toLocaleString("sv-SE")} kr`}
-              accent={theme.revenue}
-            />
-          </div>
-        </div>
-      </div>
-
-      <div
+        <div
+        ref={scrollContainerRef}
         style={{
           display: "flex",
           alignItems: "flex-start",
           minHeight: 480,
-          maxHeight: "calc(100vh - 200px)",
+          maxHeight: planningScrollMaxH,
           overflowY: "auto",
           overflowX: "hidden",
-          border: `1px solid ${theme.border}`,
-          borderRadius: 14,
           background: theme.surface,
         }}
       >
@@ -589,8 +708,40 @@ export function PlanningView({
             background: theme.bgDeep,
             display: "flex",
             flexDirection: "column",
-            maxHeight: "calc(100vh - 200px)",
+            maxHeight: planningScrollMaxH,
             zIndex: 2,
+          }}
+          onDragOver={(e) => {
+            const types = Array.from(e.dataTransfer.types);
+            if (mode === "customer") {
+              if (!types.includes(COLUMN_LEAVE_MIME)) return;
+            } else {
+              if (!types.includes(PERSON_ROW_LEAVE_MIME)) return;
+            }
+            e.preventDefault();
+            e.dataTransfer.dropEffect = "move";
+          }}
+          onDrop={(e) => {
+            if (mode === "customer") {
+              const leaveRaw = e.dataTransfer.getData(COLUMN_LEAVE_MIME);
+              const spec = parseColumnLeavePayload(leaveRaw);
+              const pid = e.dataTransfer.getData(CUSTOMER_BLOCK_REORDER_MIME);
+              if (spec && pid) {
+                e.preventDefault();
+                upsertHours(pid, spec.categoryType, spec.refId, 0);
+              }
+              return;
+            }
+            const leaveRaw = e.dataTransfer.getData(PERSON_ROW_LEAVE_MIME);
+            const rowSpec = parsePersonRowLeavePayload(leaveRaw);
+            const allocKeyDrag = e.dataTransfer.getData(PERSON_ROW_BLOCK_REORDER_MIME);
+            if (rowSpec && allocKeyDrag) {
+              const cell = parseAllocKey(allocKeyDrag);
+              if (cell) {
+                e.preventDefault();
+                upsertHours(rowSpec.personId, cell.categoryType, cell.refId, 0);
+              }
+            }
           }}
         >
           <div
@@ -604,86 +755,213 @@ export function PlanningView({
               letterSpacing: 1,
             }}
           >
-            {planMode === "customer" ? (
+            {mode === "customer" ? (
               <>
-                Team — dra till kund
+                Team — dra till kolumn
                 <div style={{ fontSize: 8, fontWeight: 600, color: theme.textSoft, marginTop: 3 }}>{activePeople.length} personer</div>
               </>
             ) : (
-              <>Team ({activePeople.length})</>
+              <>
+                Resurspool — dra till personrad
+                <div style={{ fontSize: 8, fontWeight: 600, color: theme.textSoft, marginTop: 3 }}>{activePeople.length} personer</div>
+              </>
             )}
           </div>
-          <div style={{ flex: 1, overflowY: "auto" }}>
-            {activePeople.map((person) => {
-              const st = sidebarRowStats(person);
-              const isSel = planMode === "person" && resolvedPersonId === person.id;
-              return (
-                <button
-                  key={person.id}
-                  type="button"
-                  draggable={planMode === "customer"}
-                  onDragStart={(e) => {
-                    if (planMode !== "customer") return;
-                    e.dataTransfer.setData(DRAG_MIME, person.id);
-                    e.dataTransfer.effectAllowed = "copy";
-                  }}
-                  onClick={() => setSelectedId(person.id)}
-                  style={{
-                    display: "block",
-                    width: "100%",
-                    textAlign: "left",
-                    padding: "10px 12px",
-                    cursor: planMode === "customer" ? "grab" : "pointer",
-                    border: "none",
-                    borderLeft: `3px solid ${isSel ? theme.accentBlue : "transparent"}`,
-                    background: isSel ? theme.surface : "transparent",
-                    color: "inherit",
-                    transition: "background 0.15s",
-                  }}
-                >
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 5 }}>
-                    <span
-                      style={{
-                        fontSize: 12,
-                        fontWeight: 600,
-                        color: isSel ? theme.text : theme.textMuted,
-                      }}
-                    >
-                      {person.name}
-                    </span>
-                    <span
-                      style={{
-                        fontSize: 11,
-                        fontWeight: 800,
-                        fontFamily: font,
-                        color:
-                          st.total > st.cap
-                            ? theme.danger
-                            : st.total === st.cap
-                              ? theme.ok
-                              : st.total === 0
-                                ? theme.textSoft
-                                : theme.warn,
-                      }}
-                    >
-                      {st.total.toFixed(0)}/{st.cap}h
-                    </span>
-                  </div>
-                  <HoursBar
-                    segments={allocationBarSegments(
-                      person.id,
-                      activeCustomers,
-                      activeInternal,
-                      driftCategories,
-                      getCellHours
-                    )}
-                    capacity={st.cap}
-                    height={4}
-                  />
-                </button>
-              );
-            })}
-          </div>
+          {mode === "customer" ? (
+            <div
+              style={{ flex: 1, overflowY: "auto" }}
+              onDragOver={(e) => {
+                if (!Array.from(e.dataTransfer.types).includes(COLUMN_LEAVE_MIME)) return;
+                e.preventDefault();
+                e.dataTransfer.dropEffect = "move";
+              }}
+              onDrop={(e) => {
+                const leaveRaw = e.dataTransfer.getData(COLUMN_LEAVE_MIME);
+                const spec = parseColumnLeavePayload(leaveRaw);
+                const pid = e.dataTransfer.getData(CUSTOMER_BLOCK_REORDER_MIME);
+                if (spec && pid) {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  upsertHours(pid, spec.categoryType, spec.refId, 0);
+                }
+              }}
+            >
+              {activePeople.map((person) => {
+                const st = sidebarRowStats(person);
+                return (
+                  <button
+                    key={person.id}
+                    type="button"
+                    draggable
+                    onDragStart={(e) => {
+                      e.dataTransfer.setData(DRAG_MIME, person.id);
+                      e.dataTransfer.effectAllowed = "copy";
+                    }}
+                    onDragOver={(e) => {
+                      if (!Array.from(e.dataTransfer.types).includes(COLUMN_LEAVE_MIME)) return;
+                      e.preventDefault();
+                      e.dataTransfer.dropEffect = "move";
+                    }}
+                    onDrop={(e) => {
+                      const leaveRaw = e.dataTransfer.getData(COLUMN_LEAVE_MIME);
+                      const spec = parseColumnLeavePayload(leaveRaw);
+                      const pid = e.dataTransfer.getData(CUSTOMER_BLOCK_REORDER_MIME);
+                      if (spec && pid) {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        upsertHours(pid, spec.categoryType, spec.refId, 0);
+                      }
+                    }}
+                    style={{
+                      display: "block",
+                      width: "100%",
+                      textAlign: "left",
+                      padding: "10px 12px",
+                      cursor: "grab",
+                      border: "none",
+                      borderLeft: "3px solid transparent",
+                      background: "transparent",
+                      color: "inherit",
+                      transition: "background 0.15s",
+                    }}
+                  >
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 5 }}>
+                      <span
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 8,
+                          minWidth: 0,
+                          flex: 1,
+                        }}
+                      >
+                        <span
+                          aria-hidden
+                          style={{
+                            width: 4,
+                            height: 18,
+                            borderRadius: 2,
+                            flexShrink: 0,
+                            background: getPersonUiColorFromList(activePeople, person.id),
+                            boxShadow: "inset 0 0 0 1px rgba(0,0,0,0.25)",
+                          }}
+                        />
+                        <span
+                          style={{
+                            fontSize: 14,
+                            fontWeight: 600,
+                            letterSpacing: "-0.02em",
+                            color: theme.textMuted,
+                            overflow: "hidden",
+                            textOverflow: "ellipsis",
+                            whiteSpace: "nowrap",
+                          }}
+                        >
+                          {person.name}
+                        </span>
+                      </span>
+                      <span
+                        style={{
+                          fontSize: 11,
+                          fontWeight: 800,
+                          fontFamily: font,
+                          color:
+                            st.total > st.cap
+                              ? theme.danger
+                              : st.total === st.cap
+                                ? theme.ok
+                                : st.total === 0
+                                  ? theme.textSoft
+                                  : theme.warn,
+                        }}
+                      >
+                        {st.total.toFixed(0)}/{st.cap}h
+                      </span>
+                    </div>
+                    <HoursBar
+                      segments={allocationBarSegments(
+                        person.id,
+                        activeCustomers,
+                        activeInternal,
+                        driftCategories,
+                        getCellHours
+                      )}
+                      capacity={st.cap}
+                      height={4}
+                    />
+                  </button>
+                );
+              })}
+            </div>
+          ) : (
+            <div
+              style={{ flex: 1, overflowY: "auto" }}
+              onDragOver={(e) => {
+                if (!Array.from(e.dataTransfer.types).includes(PERSON_ROW_LEAVE_MIME)) return;
+                e.preventDefault();
+                e.dataTransfer.dropEffect = "move";
+              }}
+              onDrop={(e) => {
+                const leaveRaw = e.dataTransfer.getData(PERSON_ROW_LEAVE_MIME);
+                const rowSpec = parsePersonRowLeavePayload(leaveRaw);
+                const allocKeyDrag = e.dataTransfer.getData(PERSON_ROW_BLOCK_REORDER_MIME);
+                if (rowSpec && allocKeyDrag) {
+                  const cell = parseAllocKey(allocKeyDrag);
+                  if (cell) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    upsertHours(rowSpec.personId, cell.categoryType, cell.refId, 0);
+                  }
+                }
+              }}
+            >
+              {activeCustomers.length > 0 ? (
+                <>
+                  <div style={{ padding: "8px 12px 4px", fontSize: 10, fontWeight: 700, color: COL_CUSTOMER }}>Kunder</div>
+                  {activeCustomers.map((c) => (
+                    <PoolAllocRow
+                      key={c.id}
+                      name={c.name}
+                      color={c.color || COL_CUSTOMER}
+                      categoryType="customer"
+                      refId={c.id}
+                    />
+                  ))}
+                </>
+              ) : null}
+              {activeInternal.length > 0 ? (
+                <>
+                  <div style={{ padding: "8px 12px 4px", fontSize: 10, fontWeight: 700, color: COL_INTERNAL }}>Interna projekt</div>
+                  {activeInternal.map((p) => (
+                    <PoolAllocRow
+                      key={p.id}
+                      name={p.name}
+                      color={p.color || COL_INTERNAL}
+                      categoryType="internalProject"
+                      refId={p.id}
+                    />
+                  ))}
+                </>
+              ) : null}
+              {driftCategories.length > 0 ? (
+                <>
+                  <div style={{ padding: "8px 12px 4px", fontSize: 10, fontWeight: 700, color: COL_DRIFT }}>Intern drift</div>
+                  {driftCategories.map((d) => (
+                    <PoolAllocRow
+                      key={d.id}
+                      name={d.name}
+                      color={d.color || COL_DRIFT}
+                      categoryType="internalDrift"
+                      refId={d.id}
+                    />
+                  ))}
+                </>
+              ) : null}
+              {activeCustomers.length === 0 && activeInternal.length === 0 && driftCategories.length === 0 ? (
+                <div style={{ padding: "12px 14px", fontSize: 12, color: theme.textMuted }}>Inga poster i poolen.</div>
+              ) : null}
+            </div>
+          )}
         </div>
 
         {/* Editor — scroll sker i yttre raden så sidolisten kan vara sticky */}
@@ -697,24 +975,11 @@ export function PlanningView({
             flexDirection: "column",
           }}
         >
-          {planMode === "customer" ? (
+          {mode === "customer" ? (
             <>
-              <p
-                style={{
-                  fontSize: 12,
-                  color: theme.textMuted,
-                  marginTop: 0,
-                  marginBottom: 14,
-                  lineHeight: 1.5,
-                  maxWidth: 720,
-                }}
-              >
-                Dra en person från vänsterlistan till en kundrad. Reglaget <strong>totalt team</strong> fördelar om timmar
-                mellan alla som ligger på kunden (proportionellt). Varje persons reglage ändrar bara den personen — alla andra
-                oförändrade. Övriga kolumner (intern projekt/drift) planeras under <strong>Personer</strong>.
-              </p>
+              <SectionTitle accent={COL_CUSTOMER}>Kunder — fakturerbart</SectionTitle>
               {activeCustomers.length === 0 ? (
-                <div style={{ color: theme.textMuted, fontSize: 13 }}>Inga aktiva kunder.</div>
+                <div style={{ color: theme.textMuted, fontSize: 13, marginBottom: 12 }}>Inga aktiva kunder.</div>
               ) : (
                 activeCustomers.map((c) => (
                   <CustomerColumnCard
@@ -722,81 +987,80 @@ export function PlanningView({
                     customer={c}
                     workspace={workspace}
                     selectedMonthId={selectedMonthId}
+                    selectedMonthLabel={selectedMonthLabel}
                     contributorIds={contributorsByCustomer[c.id] || []}
                     getCellHours={getCellHours}
                     upsertHours={upsertHours}
-                    setCustomerColumnTotal={setCustomerColumnTotal}
+                    clearCategoryColumnAllocationsForMonth={clearCategoryColumnAllocationsForMonth}
                     activePeople={activePeople}
                   />
                 ))
               )}
-              <div style={{ marginTop: 22, flexShrink: 0 }}>
-                <div
-                  style={{
-                    fontSize: 9,
-                    fontWeight: 700,
-                    color: theme.textSoft,
-                    fontFamily: font,
-                    textTransform: "uppercase",
-                    letterSpacing: 1,
-                    marginBottom: 10,
-                  }}
-                >
-                  Översikt — planerade timmar per kolumn (hela teamet)
-                </div>
-                <ColumnSummaryFoot
-                  custCols={custCols}
-                  intCols={intCols}
-                  driftCols={driftCols}
-                />
-              </div>
+              {activeInternal.length > 0 ? (
+                <>
+                  <SectionTitle accent={COL_INTERNAL}>Interna projekt</SectionTitle>
+                  {activeInternal.map((p) => (
+                    <AllocColumnCard
+                      key={p.id}
+                      categoryType="internalProject"
+                      item={p}
+                      workspace={workspace}
+                      selectedMonthId={selectedMonthId}
+                      selectedMonthLabel={selectedMonthLabel}
+                      contributorIds={contributorsByInternalProject[p.id] || []}
+                      getCellHours={getCellHours}
+                      upsertHours={upsertHours}
+                      clearCategoryColumnAllocationsForMonth={clearCategoryColumnAllocationsForMonth}
+                      activePeople={activePeople}
+                    />
+                  ))}
+                </>
+              ) : null}
+              {driftCategories.length > 0 ? (
+                <>
+                  <SectionTitle accent={COL_DRIFT}>Intern drift</SectionTitle>
+                  {driftCategories.map((d) => (
+                    <AllocColumnCard
+                      key={d.id}
+                      categoryType="internalDrift"
+                      item={d}
+                      workspace={workspace}
+                      selectedMonthId={selectedMonthId}
+                      contributorIds={contributorsByDrift[d.id] || []}
+                      getCellHours={getCellHours}
+                      upsertHours={upsertHours}
+                      activePeople={activePeople}
+                    />
+                  ))}
+                </>
+              ) : null}
             </>
-          ) : !selectedPerson ? (
+          ) : activePeople.length === 0 ? (
             <div style={{ color: theme.textMuted, fontSize: 13 }}>
               Inga aktiva personer. Lägg till under Inställningar → Team.
             </div>
           ) : (
-            <>
-              <PersonEditor
+            activePeople.map((person) => (
+              <PersonRowCard
+                key={person.id}
+                person={person}
                 workspace={workspace}
                 selectedMonthId={selectedMonthId}
                 selectedMonthLabel={selectedMonthLabel}
-                person={selectedPerson}
+                monthAlloc={monthAlloc}
                 getCellHours={getCellHours}
                 upsertHours={upsertHours}
                 clearPersonAllocationsForMonth={clearPersonAllocationsForMonth}
+                activePeople={activePeople}
                 activeCustomers={activeCustomers}
                 activeInternal={activeInternal}
                 driftCategories={driftCategories}
-                internalSectionOpen={internalSectionOpen}
-                setInternalSectionOpen={setInternalSectionOpen}
-                driftSectionOpen={driftSectionOpen}
-                setDriftSectionOpen={setDriftSectionOpen}
+                customersById={customersById}
               />
-
-              <div style={{ marginTop: 22, flexShrink: 0 }}>
-                <div
-                  style={{
-                    fontSize: 9,
-                    fontWeight: 700,
-                    color: theme.textSoft,
-                    fontFamily: font,
-                    textTransform: "uppercase",
-                    letterSpacing: 1,
-                    marginBottom: 10,
-                  }}
-                >
-                  Översikt — planerade timmar per kolumn (hela teamet)
-                </div>
-                <ColumnSummaryFoot
-                  custCols={custCols}
-                  intCols={intCols}
-                  driftCols={driftCols}
-                />
-              </div>
-            </>
+            ))
           )}
         </div>
+      </div>
       </div>
     </div>
   );
@@ -806,422 +1070,337 @@ function CustomerColumnCard({
   customer: c,
   workspace,
   selectedMonthId,
+  selectedMonthLabel,
   contributorIds,
   getCellHours,
   upsertHours,
-  setCustomerColumnTotal,
+  clearCategoryColumnAllocationsForMonth,
   activePeople,
 }) {
+  const showToast = usePlanningToast();
   const [dragOver, setDragOver] = useState(false);
-  const [colWarn, setColWarn] = useState(null);
 
   const list = contributorIds;
-  const columnSum = list.reduce((s, pid) => s + getCellHours(pid, "customer", c.id), 0);
-  const feasibleMax = feasibleCustomerColumnMaxTotal(workspace, selectedMonthId, c.id, list);
+  const contribKey = list.join("\0");
+  const [orderedIds, setOrderedIds] = useState(() =>
+    mergeCustomerContributorOrder(readCustomerOrder(c.id), list)
+  );
 
-  const flashWarn = (msg) => {
-    setColWarn(msg);
-    window.setTimeout(() => setColWarn(null), 7000);
-  };
+  useEffect(() => {
+    setOrderedIds((prev) => mergeCustomerContributorOrder(prev, list));
+  }, [contribKey, c.id]);
 
+  const effectiveOrder = useMemo(
+    () => mergeCustomerContributorOrder(orderedIds, list),
+    [orderedIds, contribKey, c.id]
+  );
+
+  const columnTotal = useMemo(
+    () => effectiveOrder.reduce((s, pid) => s + wholeHours(getCellHours(pid, "customer", c.id)), 0),
+    [effectiveOrder, getCellHours, c.id]
+  );
   const budgetT = customerBudgetTimmar(c);
-  const masterBudgetHint =
-    budgetT > 0
-      ? `Kundbudget ${formatHours(budgetT)} h (team) · max ${formatHours(feasibleMax)} h med nuvarande personer/kapacitet`
-      : customerBudgetTimmar(c) <= 0 && c.timpris > 0
-        ? "Ingen månadsbudget (kr) — ingen övre teamgräns."
-        : null;
+  let custAllocWarn = "balanced";
+  if (budgetT > 0) {
+    const r = columnTotal / budgetT;
+    if (r < 0.9) custAllocWarn = "under";
+    if (r > 1) custAllocWarn = "over";
+  }
+
+  const feasibleMax = feasibleCustomerColumnMaxTotal(workspace, selectedMonthId, c.id, list);
+  const trackVisualSpan =
+    budgetT > 0 ? Math.max(budgetT, columnTotal) : Math.max(feasibleMax, columnTotal);
+
+  const persistOrder = (ids) => writeCustomerOrder(c.id, ids);
+
+  const addPersonFromDrop = (pid) => {
+    if (!pid || !activePeople.some((p) => p.id === pid)) return;
+    const baseOrder = mergeCustomerContributorOrder(orderedIds, list);
+    if (baseOrder.includes(pid) || list.includes(pid)) {
+      showToast("Personen finns redan i kolumnen.");
+      return;
+    }
+    const nextOrder = [...baseOrder, pid];
+    const feasibleNext = feasibleCustomerColumnMaxTotal(workspace, selectedMonthId, c.id, [...list, pid]);
+    const sumNow = list.reduce((s, id) => s + getCellHours(id, "customer", c.id), 0);
+    const columnSlack = Math.max(0, feasibleNext - sumNow);
+    const maxP = maxHoursPersonOnCategoryCell(workspace, selectedMonthId, "customer", c.id, pid);
+    const init = Math.min(8, maxP, columnSlack);
+    if (init <= 0) {
+      if (maxP <= 0) {
+        showToast("Personen har inga timmar kvar.");
+      } else {
+        showToast("Kunden har inga timmar kvar att fördela (budget eller kolumn full).");
+      }
+      return;
+    }
+    upsertHours(pid, "customer", c.id, init);
+    setOrderedIds(nextOrder);
+    persistOrder(nextOrder);
+  };
 
   const onDrop = (e) => {
     e.preventDefault();
     setDragOver(false);
-    const pid = e.dataTransfer.getData(DRAG_MIME);
-    if (!pid || !activePeople.some((p) => p.id === pid)) return;
-    if (list.includes(pid)) return;
-    const nextList = [...list, pid];
-    let curSum = nextList.reduce((s, id) => s + getCellHours(id, "customer", c.id), 0);
-    const maxT = feasibleCustomerColumnMaxTotal(workspace, selectedMonthId, c.id, nextList);
-    if (curSum === 0 && nextList.length > 0) {
-      curSum = Math.min(8, maxT);
-    }
-    setCustomerColumnTotal(c.id, curSum, nextList);
+    addPersonFromDrop(e.dataTransfer.getData(DRAG_MIME));
   };
 
-  const removeContributor = (pid) => {
-    upsertHours(pid, "customer", c.id, 0);
-  };
+  const accent = c.color || COL_CUSTOMER;
 
   return (
-    <div style={{ marginBottom: 18 }}>
-      {colWarn ? (
-        <div
-          style={{
-            padding: "9px 11px",
-            marginBottom: 10,
-            borderRadius: 10,
-            background: "rgba(232, 186, 168, 0.12)",
-            border: "1px solid rgba(232, 186, 168, 0.45)",
-            color: theme.accentSand,
-            fontSize: 11,
-            lineHeight: 1.4,
-          }}
-        >
-          {colWarn}
-        </div>
-      ) : null}
+    <div
+      onDragOver={(e) => {
+        e.preventDefault();
+        e.dataTransfer.dropEffect = "copy";
+      }}
+      onDragEnter={() => setDragOver(true)}
+      onDragLeave={() => setDragOver(false)}
+      onDrop={onDrop}
+      style={{
+        marginBottom: 8,
+        display: "flex",
+        alignItems: "stretch",
+        gap: 10,
+        padding: "8px 12px",
+        borderRadius: 10,
+        border: `1px solid ${dragOver ? `${accent}99` : theme.border}`,
+        background: dragOver ? theme.surface2 : theme.surface,
+        transition: "border-color 0.12s, background 0.12s",
+      }}
+    >
       <div
-        onDragOver={(e) => {
-          e.preventDefault();
-          e.dataTransfer.dropEffect = "copy";
-        }}
-        onDragEnter={() => setDragOver(true)}
-        onDragLeave={() => setDragOver(false)}
-        onDrop={onDrop}
         style={{
-          padding: "12px 14px",
-          borderRadius: 12,
-          border: `1px solid ${dragOver ? `${(c.color || COL_CUSTOMER)}aa` : theme.border}`,
-          background: dragOver ? theme.surface2 : theme.surface,
-          boxShadow: dragOver ? `inset 0 0 0 1px ${(c.color || COL_CUSTOMER)}44` : "none",
-          transition: "border-color 0.15s, background 0.15s",
+          width: 4,
+          alignSelf: "stretch",
+          minHeight: 40,
+          borderRadius: 3,
+          background: accent,
+          flexShrink: 0,
         }}
-      >
-        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10, flexWrap: "wrap" }}>
-          <div
+      />
+      <div style={{ display: "flex", flexDirection: "column", minWidth: 0, flex: 1, gap: 6 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+          <div style={{ fontSize: 15, fontWeight: 800, color: theme.text, letterSpacing: "-0.02em" }}>{c.name}</div>
+          <span
             style={{
-              width: 6,
-              alignSelf: "stretch",
-              minHeight: 40,
-              borderRadius: 4,
-              background: c.color || COL_CUSTOMER,
-              flexShrink: 0,
+              fontSize: 11,
+              fontWeight: 800,
+              fontFamily: font,
+              color: budgetT > 0 ? allocColor(custAllocWarn) : theme.textMuted,
+            }}
+          >
+            {budgetT > 0
+              ? `${formatHours(columnTotal)} / ${budgetT} h`
+              : `${formatHours(columnTotal)} h`}
+          </span>
+          <TinyClearIconButton
+            disabled={columnTotal === 0}
+            title={
+              columnTotal === 0
+                ? "Inga planerade timmar i denna kolumn"
+                : `Ta bort alla timmar på ${c.name} i ${selectedMonthLabel}`
+            }
+            onClick={() => {
+              if (columnTotal === 0) return;
+              if (
+                !window.confirm(
+                  `Nollställa alla planerade timmar för kunden ”${c.name}” i ${selectedMonthLabel}? Alla personers timmar på denna kund i vald månad tas bort.`
+                )
+              ) {
+                return;
+              }
+              clearCategoryColumnAllocationsForMonth("customer", c.id);
             }}
           />
-          <div style={{ flex: "1 1 160px", minWidth: 0 }}>
-            <div style={{ fontSize: 15, fontWeight: 800, color: theme.text }}>{c.name}</div>
-            <div style={{ fontSize: 10, color: theme.textSoft, marginTop: 2 }}>
-              Släpp personer här · {list.length} i poolen · summa {formatHours(columnSum)} h
-            </div>
-          </div>
         </div>
-
-        {list.length === 0 ? (
-          <div style={{ fontSize: 12, color: theme.textMuted, padding: "8px 0" }}>
-            Inga personer i poolen. Dra från teamlistan till denna ruta.
-          </div>
-        ) : (
-          <>
-            <HourSliderRow
-              label="Totalt team (denna kund)"
-              sublabel={`${c.timpris} kr/h · beräknad budget ${formatHours(customerBudgetTimmar(c))} h`}
-              accent={c.color || COL_CUSTOMER}
-              hours={columnSum}
-              cap={feasibleMax}
-              maxSlider={Math.max(feasibleMax, columnSum, 1)}
-              budgetHintLine={masterBudgetHint}
-              commitOnPointerUp
-              onChange={(raw) => {
-                const r = wholeHours(raw);
-                if (r > feasibleMax) {
-                  flashWarn("Överstiger vad som ryms i budget och/eller personernas kapacitet.");
-                }
-                setCustomerColumnTotal(c.id, Math.min(r, feasibleMax), list);
-              }}
-            />
-            <div style={{ fontSize: 9, fontWeight: 700, color: theme.textSoft, margin: "12px 0 6px", letterSpacing: 0.4 }}>
-              PERSONER PÅ KUNDEN
-            </div>
-            {list.map((pid) => {
-              const person = activePeople.find((p) => p.id === pid);
-              if (!person) return null;
-              const lim = customerCellBudgetLimit(workspace, selectedMonthId, person.id, c.id);
-              const applyCustomer = (raw) => {
-                const h = wholeHours(raw);
-                if (lim.isCapped && Number.isFinite(lim.maxForThisPerson) && h > lim.maxForThisPerson) {
-                  flashWarn(
-                    `${c.name}: Högst ${formatHours(lim.maxForThisPerson)} h för ${person.name} med nuvarande fördelning.`
-                  );
-                }
-                upsertHours(person.id, "customer", c.id, h);
-              };
-              const budgetHintLine = lim.isCapped
-                ? `Max ${formatHours(lim.maxForThisPerson)} h för ${person.name} (budget + övriga)`
-                : null;
-              return (
-                <div key={pid} style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <HourSliderRow
-                      label={person.name}
-                      sublabel={`Kap ${person.kapacitetPerManad} h`}
-                      accent={c.color || COL_CUSTOMER}
-                      hours={getCellHours(person.id, "customer", c.id)}
-                      cap={person.kapacitetPerManad}
-                      customerMax={lim.isCapped ? lim.maxForThisPerson : undefined}
-                      budgetHintLine={budgetHintLine}
-                      commitOnPointerUp
-                      onChange={applyCustomer}
-                    />
-                  </div>
-                  <button
-                    type="button"
-                    title="Ta bort från kunden"
-                    onClick={() => removeContributor(pid)}
-                    style={{
-                      marginTop: 14,
-                      flexShrink: 0,
-                      padding: "6px 10px",
-                      borderRadius: 8,
-                      border: `1px solid ${theme.border}`,
-                      background: "rgba(232, 168, 184, 0.1)",
-                      color: theme.danger,
-                      fontSize: 11,
-                      fontWeight: 600,
-                      cursor: "pointer",
-                      fontFamily: bodyFont,
-                    }}
-                  >
-                    Ta bort
-                  </button>
-                </div>
-              );
-            })}
-          </>
-        )}
+        <CustomerHoursTrack
+          categoryType="customer"
+          refId={c.id}
+          workspace={workspace}
+          monthId={selectedMonthId}
+          feasibleMax={feasibleMax}
+          visualSpanHours={trackVisualSpan}
+          orderedPersonIds={effectiveOrder}
+          setOrderedPersonIds={setOrderedIds}
+          persistOrder={persistOrder}
+          getCellHours={getCellHours}
+          upsertHours={upsertHours}
+          activePeople={activePeople}
+          onDropPerson={addPersonFromDrop}
+        />
       </div>
     </div>
   );
 }
 
-function PersonEditor({
+/** Kundläge: internt projekt eller drift — samma spår som kund (block, skiljestreck, ±10 h). */
+function AllocColumnCard({
+  categoryType,
+  item,
   workspace,
   selectedMonthId,
   selectedMonthLabel,
-  person,
+  contributorIds,
   getCellHours,
   upsertHours,
-  clearPersonAllocationsForMonth,
-  activeCustomers,
-  activeInternal,
-  driftCategories,
-  internalSectionOpen,
-  setInternalSectionOpen,
-  driftSectionOpen,
-  setDriftSectionOpen,
+  clearCategoryColumnAllocationsForMonth,
+  activePeople,
 }) {
-  const [budgetWarn, setBudgetWarn] = useState(null);
-  const cap = person.kapacitetPerManad;
+  const showToast = usePlanningToast();
+  const [dragOver, setDragOver] = useState(false);
 
-  const billable = activeCustomers.reduce((s, c) => s + getCellHours(person.id, "customer", c.id), 0);
-  const ip = activeInternal.reduce((s, p) => s + getCellHours(person.id, "internalProject", p.id), 0);
-  const idh = driftCategories.reduce((s, d) => s + getCellHours(person.id, "internalDrift", d.id), 0);
-  const total = billable + ip + idh;
-  const remaining = cap - total;
-  const allocRate = cap > 0 ? total / cap : 0;
-  const billRate = cap > 0 ? billable / cap : 0;
-  let aw = "balanced";
-  if (allocRate < 0.9) aw = "under";
-  if (allocRate > 1) aw = "over";
-
-  let revenue = 0;
-  activeCustomers.forEach((c) => {
-    const h = getCellHours(person.id, "customer", c.id);
-    revenue += h * (c.timpris > 0 ? c.timpris : 0);
-  });
-
-  const internalHoursSum = activeInternal.reduce(
-    (s, p) => s + getCellHours(person.id, "internalProject", p.id),
-    0
-  );
-  const driftHoursSum = driftCategories.reduce(
-    (s, d) => s + getCellHours(person.id, "internalDrift", d.id),
-    0
+  const list = contributorIds;
+  const contribKey = list.join("\0");
+  const [orderedIds, setOrderedIds] = useState(() =>
+    mergeCustomerContributorOrder(readAllocColumnOrder(categoryType, item.id), list)
   );
 
-  const flashBudgetWarn = (msg) => {
-    setBudgetWarn(msg);
-    window.setTimeout(() => setBudgetWarn(null), 7000);
+  useEffect(() => {
+    setOrderedIds((prev) => mergeCustomerContributorOrder(prev, list));
+  }, [contribKey, categoryType, item.id]);
+
+  const effectiveOrder = useMemo(
+    () => mergeCustomerContributorOrder(orderedIds, list),
+    [orderedIds, contribKey, categoryType, item.id]
+  );
+
+  const columnTotal = useMemo(
+    () => effectiveOrder.reduce((s, pid) => s + wholeHours(getCellHours(pid, categoryType, item.id)), 0),
+    [effectiveOrder, getCellHours, categoryType, item.id]
+  );
+  const malT =
+    categoryType === "internalProject" && item.malTimmar != null ? wholeHours(item.malTimmar) : 0;
+  let projAllocWarn = "balanced";
+  let hoursLine = `${formatHours(columnTotal)} h`;
+  let hoursColor = theme.textMuted;
+  if (categoryType === "internalProject" && malT > 0) {
+    hoursLine = `${formatHours(columnTotal)} / ${malT} h`;
+    const r = columnTotal / malT;
+    if (r < 0.9) projAllocWarn = "under";
+    if (r > 1) projAllocWarn = "over";
+    hoursColor = allocColor(projAllocWarn);
+  }
+
+  const feasibleMax = feasibleAllocColumnMaxTotal(workspace, selectedMonthId, categoryType, item.id, list);
+  const trackVisualSpan =
+    categoryType === "internalProject" && malT > 0
+      ? Math.max(malT, columnTotal)
+      : Math.max(feasibleMax, columnTotal);
+
+  const persistOrder = (ids) => writeAllocColumnOrder(categoryType, item.id, ids);
+
+  const addPersonFromDrop = (pid) => {
+    if (!pid || !activePeople.some((p) => p.id === pid)) return;
+    const baseOrder = mergeCustomerContributorOrder(orderedIds, list);
+    if (baseOrder.includes(pid) || list.includes(pid)) {
+      showToast("Personen finns redan i kolumnen.");
+      return;
+    }
+    const nextOrder = [...baseOrder, pid];
+    const feasibleNext = feasibleAllocColumnMaxTotal(workspace, selectedMonthId, categoryType, item.id, [...list, pid]);
+    const sumNow = list.reduce((s, id) => s + getCellHours(id, categoryType, item.id), 0);
+    const columnSlack = Math.max(0, feasibleNext - sumNow);
+    const maxP = maxHoursPersonOnCategoryCell(workspace, selectedMonthId, categoryType, item.id, pid);
+    const init = Math.min(8, maxP, columnSlack);
+    if (init <= 0) {
+      if (maxP <= 0) {
+        showToast("Personen har inga timmar kvar.");
+      } else {
+        showToast(
+          categoryType === "internalProject"
+            ? "Projektet har inga timmar kvar att fördela."
+            : "Driftposten har inga timmar kvar att fördela."
+        );
+      }
+      return;
+    }
+    upsertHours(pid, categoryType, item.id, init);
+    setOrderedIds(nextOrder);
+    persistOrder(nextOrder);
+  };
+
+  const accent = item.color || (categoryType === "internalProject" ? COL_INTERNAL : COL_DRIFT);
+
+  const onDrop = (e) => {
+    e.preventDefault();
+    setDragOver(false);
+    addPersonFromDrop(e.dataTransfer.getData(DRAG_MIME));
   };
 
   return (
-    <>
-      {budgetWarn ? (
-        <div
-          style={{
-            padding: "11px 13px",
-            marginBottom: 14,
-            borderRadius: 11,
-            background: "rgba(232, 186, 168, 0.12)",
-            border: "1px solid rgba(232, 186, 168, 0.45)",
-            color: theme.accentSand,
-            fontSize: 12,
-            lineHeight: 1.4,
-          }}
-        >
-          {budgetWarn}
-        </div>
-      ) : null}
+    <div
+      onDragOver={(e) => {
+        e.preventDefault();
+        e.dataTransfer.dropEffect = "copy";
+      }}
+      onDragEnter={() => setDragOver(true)}
+      onDragLeave={() => setDragOver(false)}
+      onDrop={onDrop}
+      style={{
+        marginBottom: 8,
+        display: "flex",
+        alignItems: "stretch",
+        gap: 10,
+        padding: "8px 12px",
+        borderRadius: 10,
+        border: `1px solid ${dragOver ? `${accent}99` : theme.border}`,
+        background: dragOver ? theme.surface2 : theme.surface,
+        transition: "border-color 0.12s, background 0.12s",
+      }}
+    >
       <div
         style={{
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "flex-start",
-          flexWrap: "wrap",
-          gap: 14,
-          marginBottom: 14,
+          width: 4,
+          alignSelf: "stretch",
+          minHeight: 40,
+          borderRadius: 3,
+          background: accent,
+          flexShrink: 0,
         }}
-      >
-        <div style={{ flex: 1, minWidth: 200 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-            <div style={{ fontSize: 18, fontWeight: 800, color: theme.text }}>{person.name}</div>
-            <button
-              type="button"
-              title={total === 0 ? "Inga planerade timmar denna månad" : "Ta bort alla timmar för denna person i vald månad"}
-              disabled={total === 0}
+      />
+      <div style={{ display: "flex", flexDirection: "column", minWidth: 0, flex: 1, gap: 6 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+          <div style={{ fontSize: 15, fontWeight: 800, color: theme.text, letterSpacing: "-0.02em" }}>{item.name}</div>
+          <span style={{ fontSize: 11, fontWeight: 800, fontFamily: font, color: hoursColor }}>{hoursLine}</span>
+          {categoryType === "internalProject" && clearCategoryColumnAllocationsForMonth ? (
+            <TinyClearIconButton
+              disabled={columnTotal === 0}
+              title={
+                columnTotal === 0
+                  ? "Inga planerade timmar i denna kolumn"
+                  : `Ta bort alla timmar på ${item.name} i ${selectedMonthLabel}`
+              }
               onClick={() => {
-                if (total === 0) return;
+                if (columnTotal === 0) return;
                 if (
                   !window.confirm(
-                    `Nollställa alla planerade timmar för ${person.name} i ${selectedMonthLabel}? Globala standardtimmar på den driftpost du valt under Inställningar läggs tillbaka automatiskt.`
+                    `Nollställa alla planerade timmar för det interna projektet ”${item.name}” i ${selectedMonthLabel}? Alla personers timmar på detta projekt i vald månad tas bort.`
                   )
                 ) {
                   return;
                 }
-                clearPersonAllocationsForMonth(person.id);
+                clearCategoryColumnAllocationsForMonth("internalProject", item.id);
               }}
-              style={{
-                padding: "4px 10px",
-                borderRadius: 8,
-                border: `1px solid ${theme.border}`,
-                background: total === 0 ? "transparent" : "rgba(232, 168, 184, 0.12)",
-                color: total === 0 ? theme.textSoft : theme.danger,
-                fontSize: 11,
-                fontWeight: 600,
-                cursor: total === 0 ? "not-allowed" : "pointer",
-                fontFamily: bodyFont,
-              }}
-            >
-              Nollställ månad
-            </button>
-          </div>
-          <div style={{ fontSize: 11, color: theme.textMuted, marginTop: 3 }}>
-            Kapacitet {cap} h · Mål fakt {person.malFakturerbaraTimmar} h
-          </div>
+            />
+          ) : null}
         </div>
-        <div style={{ textAlign: "right" }}>
-          <div style={{ fontSize: 10, color: theme.textSoft }}>Allokerat / kapacitet</div>
-          <div
-            style={{
-              fontSize: 28,
-              fontWeight: 800,
-              fontFamily: font,
-              color: allocColor(aw),
-            }}
-          >
-            {formatHours(total)} h
-          </div>
-          <div style={{ fontSize: 10, color: theme.textMuted }}>
-            {remaining >= 0 ? `${formatHours(remaining)} h kvar` : `${formatHours(Math.abs(remaining))} h över`} ·{" "}
-            {pct(allocRate)} allok. · {pct(billRate)} fakt.
-          </div>
-          <div style={{ fontSize: 11, color: theme.revenue, marginTop: 3, fontFamily: font }}>
-            Intäkt (plan): {Math.round(revenue).toLocaleString("sv-SE")} kr
-          </div>
-        </div>
-      </div>
-
-      <div style={{ marginBottom: 12 }}>
-        <HoursBar
-          segments={allocationBarSegments(
-            person.id,
-            activeCustomers,
-            activeInternal,
-            driftCategories,
-            getCellHours
-          )}
-          capacity={cap}
-          height={18}
+        <CustomerHoursTrack
+          categoryType={categoryType}
+          refId={item.id}
+          workspace={workspace}
+          monthId={selectedMonthId}
+          feasibleMax={feasibleMax}
+          visualSpanHours={trackVisualSpan}
+          orderedPersonIds={effectiveOrder}
+          setOrderedPersonIds={setOrderedIds}
+          persistOrder={persistOrder}
+          getCellHours={getCellHours}
+          upsertHours={upsertHours}
+          activePeople={activePeople}
+          onDropPerson={addPersonFromDrop}
         />
       </div>
-
-      {activeCustomers.length > 0 && (
-        <SectionTitle accent={COL_CUSTOMER}>Kunder — fakturerbart</SectionTitle>
-      )}
-      {activeCustomers.map((c) => {
-        const lim = customerCellBudgetLimit(workspace, selectedMonthId, person.id, c.id);
-        const applyCustomer = (raw) => {
-          const h = wholeHours(raw);
-          if (lim.isCapped && Number.isFinite(lim.maxForThisPerson) && h > lim.maxForThisPerson) {
-            flashBudgetWarn(
-              `${c.name}: Kunden har ${formatHours(lim.budgetTimmar)} h i budgeterade timmar. Övriga personer har ${formatHours(lim.usedByOthers)} h — du kan lägga högst ${formatHours(lim.maxForThisPerson)} h här.`
-            );
-          }
-          upsertHours(person.id, "customer", c.id, h);
-        };
-        const budgetHintLine = lim.isCapped
-          ? `Budget för kunden: ${formatHours(lim.budgetTimmar)} h · ${formatHours(lim.usedByOthers)} h till andra · högst ${formatHours(lim.maxForThisPerson)} h för dig`
-          : customerBudgetTimmar(c) <= 0 && c.timpris > 0
-            ? "Ingen månadsbudget (kr) angiven — ingen övre gräns per team."
-            : null;
-
-        return (
-          <HourSliderRow
-            key={c.id}
-            label={c.name}
-            sublabel={`${c.timpris} kr/h · beräknad budget ${formatHours(customerBudgetTimmar(c))} h`}
-            accent={c.color || COL_CUSTOMER}
-            hours={getCellHours(person.id, "customer", c.id)}
-            cap={cap}
-            customerMax={lim.isCapped ? lim.maxForThisPerson : undefined}
-            budgetHintLine={budgetHintLine}
-            onChange={applyCustomer}
-          />
-        );
-      })}
-
-      {activeInternal.length > 0 ? (
-        <CollapsiblePlanningSection
-          title="Interna projekt"
-          accent={COL_INTERNAL}
-          open={internalSectionOpen}
-          onToggle={() => setInternalSectionOpen((o) => !o)}
-          summary={`${formatHours(internalHoursSum)} h · ${activeInternal.length} st`}
-        >
-          {activeInternal.map((p) => (
-            <HourSliderRow
-              key={p.id}
-              label={p.name}
-              sublabel={p.malTimmar != null ? `Mål ${p.malTimmar} h` : "Ej fakturerbart"}
-              accent={p.color || COL_INTERNAL}
-              hours={getCellHours(person.id, "internalProject", p.id)}
-              cap={cap}
-              onChange={(h) => upsertHours(person.id, "internalProject", p.id, h)}
-            />
-          ))}
-        </CollapsiblePlanningSection>
-      ) : null}
-
-      {driftCategories.length > 0 ? (
-        <CollapsiblePlanningSection
-          title="Intern drift"
-          accent={COL_DRIFT}
-          open={driftSectionOpen}
-          onToggle={() => setDriftSectionOpen((o) => !o)}
-          summary={`${formatHours(driftHoursSum)} h · ${driftCategories.length} st`}
-        >
-          {driftCategories.map((d) => (
-            <HourSliderRow
-              key={d.id}
-              label={d.name}
-              sublabel="Ej fakturerbart"
-              accent={d.color || COL_DRIFT}
-              hours={getCellHours(person.id, "internalDrift", d.id)}
-              cap={cap}
-              onChange={(h) => upsertHours(person.id, "internalDrift", d.id, h)}
-            />
-          ))}
-        </CollapsiblePlanningSection>
-      ) : null}
-    </>
+    </div>
   );
 }
 
@@ -1229,136 +1408,16 @@ function SectionTitle({ children, accent }) {
   return (
     <div
       style={{
-        fontSize: 10,
+        fontSize: 11,
         fontWeight: 700,
         color: accent,
-        marginTop: 16,
-        marginBottom: 7,
-        letterSpacing: 0.5,
-        opacity: 0.95,
+        marginTop: 18,
+        marginBottom: 8,
+        letterSpacing: 0.04,
+        opacity: 0.92,
       }}
     >
       {children}
-    </div>
-  );
-}
-
-function ColumnSummaryFoot({ custCols, intCols, driftCols }) {
-  return (
-    <div style={{ overflowX: "auto", fontSize: 12 }}>
-      <table style={{ borderCollapse: "collapse", minWidth: "100%" }}>
-        <thead>
-          <tr>
-            <th style={sumTh}>Rad</th>
-            {custCols.map((c) => (
-              <th
-                key={c.customer.id}
-                style={{ ...sumTh, color: c.customer.color || "#93c5fd" }}
-                title={c.customer.name}
-              >
-                {c.customer.name.slice(0, 14)}
-                {c.customer.name.length > 14 ? "…" : ""}
-              </th>
-            ))}
-            {intCols.map((n) => (
-              <th
-                key={n.project.id}
-                style={{ ...sumTh, color: n.project.color || "#c4b5fd" }}
-                title={n.project.name}
-              >
-                {n.project.name.length > 14 ? `${n.project.name.slice(0, 14)}…` : n.project.name}
-              </th>
-            ))}
-            {driftCols.map((c) => (
-              <th
-                key={c.drift.id}
-                style={{ ...sumTh, color: c.drift.color || "#94a3b8" }}
-              >
-                {c.drift.name}
-              </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          <tr>
-            <td style={sumTd}>Σ timmar</td>
-            {custCols.map((c) => (
-              <td key={c.customer.id} style={sumTdNum}>
-                {formatHours(c.planerade)}
-              </td>
-            ))}
-            {intCols.map((c) => (
-              <td key={c.project.id} style={sumTdNum}>
-                {formatHours(c.planerade)}
-              </td>
-            ))}
-            {driftCols.map((c) => (
-              <td key={c.drift.id} style={sumTdNum}>
-                {formatHours(c.planerade)}
-              </td>
-            ))}
-          </tr>
-          <tr>
-            <td style={{ ...sumTd, color: theme.textMuted, fontSize: 10 }}>Budget/mål</td>
-            {custCols.map((c) => (
-              <td key={c.customer.id} style={{ ...sumTdNum, fontSize: 11 }}>
-                {c.budgetTimmar > 0 ? formatHours(c.budgetTimmar) : "—"}
-              </td>
-            ))}
-            {intCols.map((c) => (
-              <td key={c.project.id} style={{ ...sumTdNum, fontSize: 11 }}>
-                {c.malTimmar != null ? formatHours(c.malTimmar) : "—"}
-              </td>
-            ))}
-            {driftCols.map((c) => (
-              <td key={c.drift.id} style={{ ...sumTdNum, fontSize: 11 }}>
-                —
-              </td>
-            ))}
-          </tr>
-        </tbody>
-      </table>
-    </div>
-  );
-}
-
-const sumTh = {
-  padding: "7px 5px",
-  textAlign: "center",
-  fontSize: 9,
-  fontWeight: 700,
-  color: theme.accentBlue,
-  borderBottom: `1px solid ${theme.border}`,
-  background: theme.surface2,
-};
-const sumTd = {
-  padding: "7px 5px",
-  borderBottom: `1px solid ${theme.border}`,
-  background: theme.bgDeep,
-};
-const sumTdNum = { ...sumTd, textAlign: "right", fontFamily: font };
-
-function Kpi({ label, value, accent }) {
-  return (
-    <div
-      style={{
-        padding: "6px 10px",
-        background: theme.surface2,
-        borderRadius: 9,
-        border: `1px solid ${theme.border}`,
-      }}
-    >
-      <div
-        style={{
-          fontSize: 8,
-          color: theme.textSoft,
-          textTransform: "uppercase",
-          letterSpacing: 0.5,
-        }}
-      >
-        {label}
-      </div>
-      <div style={{ fontSize: 13, fontWeight: 700, fontFamily: font, color: accent ?? theme.text }}>{value}</div>
     </div>
   );
 }
